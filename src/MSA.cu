@@ -18,6 +18,57 @@
 #include <chrono>
 #include <iostream>
 #include <cub/cub.cuh>
+#include <cstdlib>
+#include <algorithm>
+#include <vector>
+#include <array>
+#include <cmath>
+
+namespace {
+float entropyGammaFromEnvironment() {
+    const char* value = std::getenv("DIPPER_ENTROPY_GAMMA");
+    if (!value) return 2.0f;
+    char* end = nullptr;
+    float gamma = std::strtof(value, &end);
+    return (end != value && std::isfinite(gamma) && gamma >= 0.0f) ? gamma : 2.0f;
+}
+
+__constant__ float d_aaSimMatrix[20][20];
+
+std::array<float, 400> buildProteinSimilarityMatrix() {
+    std::array<float, 400> matrix{};
+    for (int i = 0; i < 20; ++i) matrix[i * 20 + i] = 1.0f;
+    // DIPPER's protein order is A,C,G,T,D,E,F,H,I,K,L,M,N,P,Q,R,S,V,W,Y.
+    // Positive BLOSUM62/LG-like conservative groups are assigned their
+    // normalized empirical similarity; all other substitutions remain zero.
+    const auto addGroup = [&](std::initializer_list<int> group, float value) {
+        for (int a : group) for (int b : group)
+            if (a != b) matrix[a * 20 + b] = std::max(matrix[a * 20 + b], value);
+    };
+    addGroup({8, 10, 11, 17}, 0.50f); // I,L,M,V
+    addGroup({6, 18, 19}, 0.45f);      // F,W,Y
+    addGroup({4, 5}, 0.42f);           // D,E
+    addGroup({9, 15}, 0.42f);           // K,R
+    addGroup({12, 14}, 0.35f);          // N,Q
+    addGroup({16, 3}, 0.30f);           // S,T (T shares DNA index 3)
+    addGroup({0, 16}, 0.25f);           // A,S
+    addGroup({2, 16}, 0.20f);           // G,S
+    return matrix;
+}
+
+float gammaAlphaFromEnvironment() {
+    const char* value = std::getenv("DIPPER_GAMMA_ALPHA");
+    if (!value) return 0.8f;
+    char* end = nullptr;
+    float alpha = std::strtof(value, &end);
+    return (end != value && std::isfinite(alpha) && alpha > 0.0f) ? alpha : 0.8f;
+}
+
+bool binaryProteinFromEnvironment() {
+    const char* value = std::getenv("DIPPER_BINARY_AA");
+    return value && value[0] == '1';
+}
+}
 
 void MashPlacement::MSADeviceArrays::allocateDeviceArrays(uint64_t ** h_compressedSeqs, uint64_t * h_seqLengths, size_t num, Param& params)
 {
@@ -76,12 +127,75 @@ void MashPlacement::MSADeviceArrays::allocateDeviceArrays(uint64_t ** h_compress
         exit(1);
     }
 
+    // Protein distances use one weight per alignment column.  The weights
+    // are computed once from the complete MSA and reused by every pairwise
+    // GPU calculation.  DNA keeps a null pointer and the kernel uses w=1.
+    if (params.isProtein) {
+        std::array<float, 400> similarity = buildProteinSimilarityMatrix();
+        if (binaryProteinFromEnvironment()) {
+            similarity.fill(0.0f);
+            for (int i = 0; i < 20; ++i) similarity[i * 20 + i] = 1.0f;
+        }
+        err = cudaMemcpyToSymbol(d_aaSimMatrix, similarity.data(), similarity.size() * sizeof(float));
+        if (err != cudaSuccess) {
+            fprintf(stderr, "Gpu_ERROR: cudaMemcpyToSymbol for amino-acid matrix failed!\n");
+            exit(1);
+        }
+        const float gamma = entropyGammaFromEnvironment();
+        const int length = seqLen;
+        std::vector<std::array<uint32_t, 20>> counts(length);
+        for (auto& column : counts) column.fill(0);
+        for (size_t row = 0; row < numSequences; ++row) {
+            const uint64_t words = (h_seqLengths[row] + 7) / 8;
+            for (uint64_t word = 0; word < words; ++word) {
+                const uint64_t packed = h_compressedSeqs[row][word];
+                for (int b = 0; b < 8; ++b) {
+                    const int column = static_cast<int>(word * 8 + b);
+                    if (column >= length) break;
+                    const uint8_t aa = static_cast<uint8_t>((packed >> (b * 8)) & 0xffu);
+                    if (aa < 20) ++counts[column][aa];
+                }
+            }
+        }
+        std::vector<float> weights(length, 1.0f);
+        if (gamma != 0.0f) {
+            constexpr float invLog20 = 1.0f / 2.995732273553991f;
+            for (int column = 0; column < length; ++column) {
+                uint32_t total = 0;
+                for (uint32_t count : counts[column]) total += count;
+                if (total == 0) continue;
+                float entropy = 0.0f;
+                for (uint32_t count : counts[column]) {
+                    if (count == 0) continue;
+                    const float frequency = static_cast<float>(count) / total;
+                    entropy -= frequency * std::log(frequency);
+                }
+                entropy = std::min(1.0f, std::max(0.0f, entropy * invLog20));
+                weights[column] = std::exp(-gamma * entropy);
+            }
+        }
+        const size_t paddedLength = ((static_cast<size_t>(length) + 7) / 8) * 8;
+        std::vector<float> paddedWeights(paddedLength, 0.0f);
+        std::copy(weights.begin(), weights.end(), paddedWeights.begin());
+        err = cudaMalloc(&d_siteWeights, paddedLength * sizeof(float));
+        if (err != cudaSuccess) {
+            fprintf(stderr, "Gpu_ERROR: cudaMalloc for site weights failed!\n");
+            exit(1);
+        }
+        err = cudaMemcpy(d_siteWeights, paddedWeights.data(), paddedLength * sizeof(float), cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "Gpu_ERROR: cudaMemcpy for site weights failed!\n");
+            exit(1);
+        }
+    }
+
     cudaDeviceSynchronize();
 }
 
 void MashPlacement::MSADeviceArrays::deallocateDeviceArrays(){
     cudaFree(d_compressedSeqs);
     cudaFree(d_seqLengths);
+    cudaFree(d_siteWeights);
     // cudaFree(d_hashList);
     // cudaFree(d_mashDist);
 }
@@ -112,14 +226,14 @@ __device__ void calculateParams(int tarRowId, int curRowId, int seqLen, uint64_t
 }
 
 /** Parallel count useful/matches over compressed rows; supports DNA (4-bit) and protein (8-bit). */
-__device__ void calculateParamsParallel(int tarRowId, int curRowId, int seqLen, uint64_t * compressedSeqs, int & useful, int & match, bool isProtein){
+__device__ void calculateParamsParallel(int tarRowId, int curRowId, int seqLen, uint64_t * compressedSeqs, float * siteWeights, float & useful, float & match, bool isProtein){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     int compLen=isProtein ? (seqLen+7)/8 : (seqLen+15)/16;
     long long px=1ll*curRowId*compLen, py=1ll*tarRowId*compLen;
 
     // create a shared memory array to store results
-    __shared__ int sharedUseful[1024];
-    __shared__ int sharedMatch[1024];
+    __shared__ float sharedUseful[1024];
+    __shared__ float sharedMatch[1024];
     sharedUseful[tx] = 0;
     sharedMatch[tx] = 0;
 
@@ -129,16 +243,18 @@ __device__ void calculateParamsParallel(int tarRowId, int curRowId, int seqLen, 
             for(int j=0;j<8&&i*8+j<seqLen;j++){
                 int et=(vt>>(j*8))&255, ec=(vc>>(j*8))&255;
                 if(et<20&&ec<20) {
-                    sharedUseful[tx]++;
-                    if(et==ec) sharedMatch[tx]++;
+                    const float weight = siteWeights ? siteWeights[i * 8 + j] : 1.0f;
+                    const float similarity = d_aaSimMatrix[et][ec];
+                    sharedUseful[tx] += weight;
+                    sharedMatch[tx] += weight * similarity;
                 }
             }
         } else {
             for(int j=0;j<16&&i*16+j<seqLen;j++){
                 int et=(vt>>(j*4))&15, ec=(vc>>(j*4))&15;
                 if(et<4&&ec<4) {
-                    sharedUseful[tx]++;
-                    if(et==ec) sharedMatch[tx]++;
+                    sharedUseful[tx] += 1.0f;
+                    if(et==ec) sharedMatch[tx] += 1.0f;
                 }
             }
         }
@@ -420,7 +536,9 @@ __global__ void MSADistConstruction(
     int seqLen,
     int numSequences,
     int distanceType,
-    bool isProtein
+    bool isProtein,
+    float * siteWeights,
+    float gammaAlpha
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     int idx=tx+bs*bx;
@@ -429,17 +547,24 @@ __global__ void MSADistConstruction(
         if (blockID >= rowId) return; // Ensure we don't access out of bounds
         // printf("bx: %d, rowId: %d\n", blockID, rowId);
         if(distanceType==DIST_UNCORRECTED||distanceType==DIST_JUKESCANTOR){
-            int useful=0, match=0;
-            calculateParamsParallel(rowId, blockID, seqLen, compressedSeqs, useful, match, isProtein);
+            float useful=0.0f, match=0.0f;
+            calculateParamsParallel(rowId, blockID, seqLen, compressedSeqs, siteWeights, useful, match, isProtein);
             // calculateParams(rowId, idx, seqLen, compressedSeqs, useful, match);
             if (tx == 0) {   
-                double uncor = (useful > 0) ? (1.0 - double(match)/useful) : 0.999;
-                if (uncor >= 0.999) uncor = 0.999;
+                const double priorWeight = isProtein ? 3.0 : 0.0;
+                const double priorMatch = isProtein ? 0.15 * priorWeight : 0.0;
+                const double effectiveUseful = double(useful) + priorWeight;
+                const double effectiveMatch = double(match) + priorMatch;
+                double uncor = (effectiveUseful > 0.0)
+                    ? (1.0 - effectiveMatch / effectiveUseful) : 0.999;
+                uncor = fmin(0.999999, fmax(0.0, uncor));
                 if(distanceType==DIST_UNCORRECTED) dist[blockID]=uncor;
                 else {
                     if (isProtein) {
-                        double arg = 1.0 - uncor - 0.2 * uncor * uncor;
-                        dist[blockID] = (arg > 0.001) ? -log(arg) : -log(0.001);
+                        const double alpha = gammaAlpha;
+                        const double ratio = min(0.98, max(0.0, uncor / 0.92));
+                        const double gammaDist = alpha * (pow(1.0 - ratio, -1.0 / alpha) - 1.0);
+                        dist[blockID] = min(3.5, max(0.0, gammaDist));
                     }
                     else dist[blockID]=-0.75*log(1.0-uncor/0.75);
                 }
@@ -496,7 +621,8 @@ void MashPlacement::MSADeviceArrays::distConstructionOnGpu(Param& params, int ro
         seqLen,
         numSequences,
         params.distanceType,
-        params.isProtein
+        params.isProtein,
+        d_siteWeights,
+        gammaAlphaFromEnvironment()
     );
 }
-

@@ -107,8 +107,9 @@ namespace MashPlacement
 
     /** Device arrays for aligned sequences: 4-bit compressed MSA, seq lengths, distance construction. */
     struct MSADeviceArrays{
-        uint64_t * d_compressedSeqs;
-        uint64_t * d_seqLengths;
+        uint64_t * d_compressedSeqs = nullptr;
+        uint64_t * d_seqLengths = nullptr;
+        float * d_siteWeights = nullptr;
         size_t numSequences;
         int seqLen;
 

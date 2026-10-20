@@ -127,8 +127,10 @@ __device__ void calculateParamsDC(int tarRowId, int curRowId, int seqLen, uint64
         long long vt=compressedSeqs[px+i], vc=compressedSeqs[py+i];
         for(int j=0;j<16&&i*16+j<seqLen;j++){
             int et=(vt>>(j*4))&15, ec=(vc>>(j*4))&15;
-            if(et<4||ec<4) useful++;
-            if(et<4&&et==ec) match++;
+            if(et<4&&ec<4) {
+                useful++;
+                if(et==ec) match++;
+            }
         }
     }
 }
@@ -143,23 +145,20 @@ __device__ void calculateParamsDCParallel(int tarRowId, int curRowId, int seqLen
     sharedUseful[tx]=0;
     sharedMatch[tx]=0;
 
-    if (tx >= compLen) {
-        return; // If thread index is out of bounds, exit early
-    }
-
     for(int i=tx;i<compLen;i+=1024){
         long long vt=compressedSeqs[px+i], vc=compressedSeqs[py+i];
         for(int j=0;j<16&&i*16+j<seqLen;j++){
             int et=(vt>>(j*4))&15, ec=(vc>>(j*4))&15;
-            if(et<4||ec<4) sharedUseful[tx]++;
-            if(et<4&&et==ec) sharedMatch[tx]++;
+            if(et<4&&ec<4) {
+                sharedUseful[tx]++;
+                if(et==ec) sharedMatch[tx]++;
+            }
         }
     }
 
     __syncthreads();
 
     // reduction
-    if (tx >= 1024) return;
     for(int stride=1024/2; stride>0; stride/=2){
         if(tx<stride){
             sharedUseful[tx] += sharedUseful[tx + stride];
@@ -183,8 +182,10 @@ __device__ void calculateParamsBatchDC(int tarRowId, int curRowId, int seqLen, u
         long long vt=compressedSeqs[px+i], vc=compressedSeqsConst[py+i];
         for(int j=0;j<16&&i*16+j<seqLen;j++){
             int et=(vt>>(j*4))&15, ec=(vc>>(j*4))&15;
-            if(et<4||ec<4) useful++;
-            if(et<4&&et==ec) match++;
+            if(et<4&&ec<4) {
+                useful++;
+                if(et==ec) match++;
+            }
         }
     }
 }
@@ -199,22 +200,19 @@ __device__ void calculateParamsBatchDCParallel(int tarRowId, int curRowId, int s
     sharedUseful[tx]=0;
     sharedMatch[tx]=0;
 
-    if (tx >= compLen) {
-        return; // If thread index is out of bounds, exit early
-    }
-
     for(int i=tx;i<compLen;i+=1024){
         long long vt=compressedSeqs[px+i], vc=compressedSeqsConst[py+i];
         for(int j=0;j<16&&i*16+j<seqLen;j++){
             int et=(vt>>(j*4))&15, ec=(vc>>(j*4))&15;
-            if(et<4||ec<4) sharedUseful[tx]++;
-            if(et<4&&et==ec) sharedMatch[tx]++;
+            if(et<4&&ec<4) {
+                sharedUseful[tx]++;
+                if(et==ec) sharedMatch[tx]++;
+            }
         }
     }
     __syncthreads();
 
     // reduction
-    if (tx >= 1024) return;
     for(int stride=1024/2; stride>0; stride/=2){
         if(tx<stride){
             sharedUseful[tx] += sharedUseful[tx + stride];
@@ -984,5 +982,3 @@ void MashPlacement::MSADeviceArraysDC::distSpecialIDConstructionOnGpuDC(Param& p
         d_leafMap
     );
 }
-
-
