@@ -309,17 +309,17 @@ __device__ void calculateParamsBatchDCParallel(int tarRowId, int curRowId, int s
 }
 
 __device__ void calculateProteinDC(int tarRowId, int curRowId, int seqLen,
-                                   uint64_t* target, uint64_t* current,
+                                   uint64_t* compressedSeqs, uint64_t* compressedSeqsConst,
                                    float* siteWeights, float& useful, float& similarity) {
     const int words = (seqLen + 7) / 8;
-    const long long targetOffset = 1ll * tarRowId * words;
     const long long currentOffset = 1ll * curRowId * words;
+    const long long targetOffset = 1ll * tarRowId * words;
     for (int word = 0; word < words; ++word) {
-        const uint64_t targetWord = target[targetOffset + word];
-        const uint64_t currentWord = current[currentOffset + word];
+        const uint64_t currentWord = compressedSeqs[currentOffset + word];
+        const uint64_t targetWord = compressedSeqsConst[targetOffset + word];
         for (int slot = 0; slot < 8 && word * 8 + slot < seqLen; ++slot) {
-            const int a = decodeDC(targetWord, slot, true);
-            const int b = decodeDC(currentWord, slot, true);
+            const int a = decodeDC(currentWord, slot, true);
+            const int b = decodeDC(targetWord, slot, true);
             if (a >= 20 || b >= 20) continue;
             const float weight = siteWeights ? siteWeights[word * 8 + slot] : 1.0f;
             useful += weight;
@@ -329,22 +329,22 @@ __device__ void calculateProteinDC(int tarRowId, int curRowId, int seqLen,
 }
 
 __device__ void calculateProteinDCParallel(int tarRowId, int curRowId, int seqLen,
-                                           uint64_t* target, uint64_t* current,
+                                           uint64_t* compressedSeqs, uint64_t* compressedSeqsConst,
                                            float* siteWeights, float& useful, float& similarity) {
     const int tx = threadIdx.x;
     const int words = (seqLen + 7) / 8;
-    const long long targetOffset = 1ll * tarRowId * words;
     const long long currentOffset = 1ll * curRowId * words;
+    const long long targetOffset = 1ll * tarRowId * words;
     __shared__ float sharedUseful[1024];
     __shared__ float sharedSimilarity[1024];
     sharedUseful[tx] = 0.0f;
     sharedSimilarity[tx] = 0.0f;
     for (int word = tx; word < words; word += 1024) {
-        const uint64_t targetWord = target[targetOffset + word];
-        const uint64_t currentWord = current[currentOffset + word];
+        const uint64_t currentWord = compressedSeqs[currentOffset + word];
+        const uint64_t targetWord = compressedSeqsConst[targetOffset + word];
         for (int slot = 0; slot < 8 && word * 8 + slot < seqLen; ++slot) {
-            const int a = decodeDC(targetWord, slot, true);
-            const int b = decodeDC(currentWord, slot, true);
+            const int a = decodeDC(currentWord, slot, true);
+            const int b = decodeDC(targetWord, slot, true);
             if (a >= 20 || b >= 20) continue;
             const float weight = siteWeights ? siteWeights[word * 8 + slot] : 1.0f;
             sharedUseful[tx] += weight;
@@ -1065,9 +1065,9 @@ __global__ void MSADistConstructionSpecialIDDC(
     if(idx==-1) return;
 
     int idx_const = idx;
-    if (idx > backboneSize) idx_const = mapIdx;
+    if (idx >= backboneSize) idx_const = mapIdx;
     uint64_t * compressedSeqs = compressedSeqsBackbone;
-    if (idx > backboneSize) compressedSeqs = compressedSeqsConst;
+    if (idx >= backboneSize) compressedSeqs = compressedSeqsConst;
 
     if(distanceType==DIST_UNCORRECTED||distanceType==DIST_JUKESCANTOR){
         double uncor;

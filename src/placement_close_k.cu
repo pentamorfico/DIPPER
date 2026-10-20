@@ -12,6 +12,7 @@
 #include <iostream>
 #include <fstream>
 #include <cub/cub.cuh>
+#include <cfloat>
 
 void MashPlacement::KPlacementDeviceArrays::allocateDeviceArrays(size_t num, int backboneSize)
 {
@@ -81,7 +82,7 @@ __global__ void initializeID(
     {
         for (int i = 0; i < 5; i++)
         {
-            d_closest_dis[idx * 5 + i] = 2;
+            d_closest_dis[idx * 5 + i] = DBL_MAX;
             d_closest_id[idx * 5 + i] = -1;
         }
     }
@@ -168,7 +169,7 @@ void MashPlacement::KPlacementDeviceArrays::initializeDeviceArrays(Tree *t)
     {
         h_e[i] = -1;
         h_nxt[i] = -1;
-        h_len[i] = 2;
+        h_len[i] = DBL_MAX;
         h_belong[i] = -1;
     }
 
@@ -304,7 +305,7 @@ __global__ void initialize(
         {
             for (int i = 0; i < 5; i++)
             {
-                d_closest_dis[t * 5 + i] = 2;
+                d_closest_dis[t * 5 + i] = DBL_MAX;
                 d_closest_id[t * 5 + i] = -1;
             }
             nxt[t] = -1;
@@ -365,7 +366,7 @@ __global__ void calculateBranchLength(
     for (int idx=idx_; idx<lim; idx+=bs*gs){
         if(idx>=lim) return;
         if(idx>=num*4-4||belong[idx]<e[idx]){
-            thrust::tuple <int,double,double> minTuple(0,0,2);
+            thrust::tuple <int,double,double> minTuple(0,0,DBL_MAX);
             minPos[idx]=minTuple;
             continue;
         }
@@ -383,7 +384,7 @@ __global__ void calculateBranchLength(
         /* modified for fixed topology */
         while(otheid!=-1 && e[otheid]!=x) otheid=nxt[otheid];
         if(otheid==-1){
-            thrust::tuple <int,double,double> minTuple(0,0,2);
+            thrust::tuple <int,double,double> minTuple(0,0,DBL_MAX);
             minPos[idx]=minTuple;
             continue;
         }
@@ -942,7 +943,7 @@ void MashPlacement::KPlacementDeviceArrays::findPlacementTree(
             numSequences
         );
         
-        auto iter=thrust::min_element(minPos.begin(),minPos.end(),compare_tuple());
+        auto iter=thrust::min_element(minPos.begin(),minPos.begin()+i*4-4,compare_tuple());
         thrust::tuple<int,double,double> smallest=*iter;
         // /* print top 5 sorted elements */
         // for(int j=0;j<5;j++){
@@ -1083,7 +1084,7 @@ void MashPlacement::KPlacementDeviceArrays::addQuery(
             d_closest_dis,
             d_closest_id,
             numSequences);
-        auto iter = thrust::min_element(minPos.begin(), minPos.end(), compare_tuple());
+        auto iter = thrust::min_element(minPos.begin(), minPos.begin() + i * 4 - 4, compare_tuple());
         thrust::tuple<int, double, double> smallest = *iter;
         /*
         Update Tree (and assign closest nodes to newly added nodes)
@@ -1247,7 +1248,7 @@ MashPlacement::KPlacementDeviceArrays::findBestEdge(
         numSequences);
 
     /* Find globally optimal edge. */
-    auto iter = thrust::min_element(minPos.begin(), minPos.end(), compare_tuple());
+    auto iter = thrust::min_element(minPos.begin(), minPos.begin() + seqIdx * 4 - 4, compare_tuple());
     thrust::tuple<int, double, double> smallest = *iter;
     m_pendingEid     = thrust::get<0>(smallest);
     m_pendingFracLen = thrust::get<1>(smallest);

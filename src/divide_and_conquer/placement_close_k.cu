@@ -24,6 +24,7 @@
 #include <iostream>
 #include <cub/cub.cuh>
 #include <cuda_runtime.h>
+#include <cfloat>
 
 /** Allocate DC placement arrays: adjacency, closest_id/dis (and cluster copies), dist, len. */
 void MashPlacement::KPlacementDeviceArraysDC::allocateDeviceArraysDC(size_t num, size_t totalNum, int gpuNum){
@@ -114,7 +115,7 @@ __global__ void initializeDC(
     for (int idx_=idx; idx_<lim; idx_+=gs*bs) {
         if(idx_>=lim) return;
         for(int i=0;i<5;i++){
-            d_closest_dis[idx_*5+i]=2;
+            d_closest_dis[idx_*5+i]=DBL_MAX;
             d_closest_id[idx_*5+i]=-1;
         }
         nxt[idx_] = -1;
@@ -151,10 +152,11 @@ __global__ void calculateBranchLengthDC(
     int idx=tx+bs*bx;
     // if(idx>=lim) return;
     for (int idx_=idx; idx_<lim; idx_+=gs*bs) {
+        if(idx_>=lim) return;
         if(idx_>=num*4-4||belong[idx_]<e[idx_]){
-            thrust::tuple <int,double,double> minTuple(0,0,2);
-            minPos[bx*bs+tx]=minTuple;
-            return;
+            thrust::tuple <int,double,double> minTuple(0,0,DBL_MAX);
+            minPos[idx_]=minTuple;
+            continue;
         }
         int x=belong[idx_],oth=e[idx_];
         int eid=idx_,otheid;
@@ -182,7 +184,7 @@ __global__ void calculateBranchLengthDC(
         double rest=len[eid]-dis1-dis2;
         dis1+=rest/2,dis2+=rest/2;
         thrust::tuple <int,double,double> minTuple(eid,dis1,additional_dis);
-        minPos[bx*bs+tx]=minTuple;
+        minPos[idx_]=minTuple;
     }
 }
 
@@ -205,13 +207,13 @@ __global__ void calculateBranchLengthSpecialIDDC(
     int tx=threadIdx.x,bs=blockDim.x,bx=blockIdx.x,gs=gridDim.x;
     int idx=tx+bs*bx;
     // if(idx>=numToCalculate) return;
-    for (int idx_=idx; idx_<numToCalculate; idx_+=gs*bs) {
-        if(idx_>=numToCalculate) return;
-        idx_ = d_edgeMask[idx_];
+    for (int i_=idx; i_<numToCalculate; i_+=gs*bs) {
+        if(i_>=numToCalculate) return;
+        int idx_ = d_edgeMask[i_];
         if(belong[idx_]<e[idx_]){
-            thrust::tuple <int,double,double> minTuple(0,0,2);
-            minPos[bx*bs+tx]=minTuple;
-            return;
+            thrust::tuple <int,double,double> minTuple(0,0,DBL_MAX);
+            minPos[i_]=minTuple;
+            continue;
         }
         int x=belong[idx_],oth=e[idx_];
         int eid=idx_,otheid;
@@ -239,7 +241,7 @@ __global__ void calculateBranchLengthSpecialIDDC(
         double rest=len[eid]-dis1-dis2;
         dis1+=rest/2,dis2+=rest/2;
         thrust::tuple <int,double,double> minTuple(eid,dis1,additional_dis);
-        minPos[bx*bs+tx]=minTuple;
+        minPos[i_]=minTuple;
     }
 }
 
@@ -1100,7 +1102,7 @@ void MashPlacement::KPlacementDeviceArraysDC::findClustersDC(
             auto treeStart = std::chrono::high_resolution_clock::now();
             
             calculateBranchLengthDC <<<blockNum,threadNum>>> (
-                j,
+                numSequences,
                 d_head,
                 d_nxt,
                 d_dist,
@@ -1250,7 +1252,7 @@ void MashPlacement::KPlacementDeviceArraysDC::findClustersDC_batch(
         auto treeStart = std::chrono::high_resolution_clock::now();
         
         calculateBranchLengthDC <<<blockNum,threadNum>>> (
-            clusteringBatchIdx*params.batchSize + i,
+            numSequences,
             d_head,
             d_nxt,
             d_dist,
@@ -1481,7 +1483,7 @@ void resetIdFromDisDC(int * id, int * from, double * dis, int size){
     if(idx>=size) return;
     id[idx] = -1;
     from[idx] = -1;
-    dis[idx] = 2.0;   
+    dis[idx] = DBL_MAX;
 }
 
 /** For each cluster: transfer MASH/MSA data, initializeClusterDC, then place each leaf

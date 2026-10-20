@@ -1,6 +1,7 @@
 #include "mash_placement.cuh"
 
 #include <stdio.h>
+#include <cfloat>
 #include <queue>
 #include <thrust/sort.h>
 #include <thrust/scan.h>
@@ -171,7 +172,7 @@ __global__ void calculateBranchLength(
     int idx=tx+bs*bx;
     if(idx>=lim) return;
     if(idx>=num*4-4||d_dep[belong[idx]]>d_dep[e[idx]]){
-        thrust::tuple <int,double,double> minTuple(0,0,2);
+        thrust::tuple <int,double,double> minTuple(0,0,DBL_MAX);
         minPos[bx*bs+tx]=minTuple;
         return;
     }
@@ -738,7 +739,7 @@ void MashPlacement::PlacementDeviceArrays::findPlacementTree(
             d_lim,
             d_dep
         );
-        auto iter=thrust::min_element(minPos.begin(),minPos.end(),compare_tuple());
+        auto iter=thrust::min_element(minPos.begin(),minPos.begin()+i*4-4,compare_tuple());
         thrust::tuple<int,double,double> smallest=*iter;
         /*
         Update Tree

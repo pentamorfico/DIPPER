@@ -13,6 +13,7 @@
 #endif
 
 #include <stdio.h>
+#include <cfloat>
 #include <queue>
 #include <thrust/sort.h>
 #include <thrust/scan.h>
@@ -620,7 +621,7 @@ __global__ void initialize(
     int idx=tx+bs*bx;
     if(idx<lim){
         for(int i=0;i<5;i++){
-            d_closest_dis[idx*5+i]=2;
+            d_closest_dis[idx*5+i]=DBL_MAX;
             d_closest_id[idx*5+i]=-1;
         }
         nxt[idx] = -1;
@@ -659,7 +660,7 @@ __global__ void calculateBranchLength(
     int idx=tx+bs*bx;
     if(idx>=lim) return;
     if(idx>=num*4-4||belong[idx]<e[idx]){
-        thrust::tuple <int,double,double> minTuple(0,0,2);
+        thrust::tuple <int,double,double> minTuple(0,0,DBL_MAX);
         minPos[bx*bs+tx]=minTuple;
         return;
     }
@@ -1023,7 +1024,7 @@ void MashPlacement::findPlacementTree(
             d_closest_id,
             numSequences
         );
-        auto iter=thrust::min_element(minPos.begin(),minPos.end(),compare_tuple());
+        auto iter=thrust::min_element(minPos.begin(),minPos.begin()+i*4-4,compare_tuple());
         thrust::tuple<int,double,double> smallest=*iter;
         /*
         Update Tree (and assign closest nodes to newly added nodes)
