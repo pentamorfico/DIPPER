@@ -179,6 +179,12 @@ __device__ inline int decodeDC(uint64_t word, int slot, bool isProtein) {
     return static_cast<int>((word >> (slot * (isProtein ? 8 : 4))) & (isProtein ? 0xffu : 0xfu));
 }
 
+__device__ inline double gammaProteinDistanceDC(double uncorrected, double alpha) {
+    const double ratio = fmin(0.98, fmax(0.0, uncorrected / 0.92));
+    const double value = alpha * (pow(1.0 - ratio, -1.0 / alpha) - 1.0);
+    return fmin(3.5, fmax(0.0, value));
+}
+
 
 __device__ void calculateParamsDC(int tarRowId, int curRowId, int seqLen, uint64_t * compressedSeqs, int & useful, int & match, bool isProtein){
     int slots = isProtein ? 8 : 16;
@@ -292,6 +298,64 @@ __device__ void calculateParamsBatchDCParallel(int tarRowId, int curRowId, int s
     if(tx==0){
         useful=sharedUseful[0];
         match=sharedMatch[0];
+    }
+    __syncthreads();
+}
+
+__device__ void calculateProteinDC(int tarRowId, int curRowId, int seqLen,
+                                   uint64_t* target, uint64_t* current,
+                                   float* siteWeights, float& useful, float& similarity) {
+    const int words = (seqLen + 7) / 8;
+    const long long targetOffset = 1ll * tarRowId * words;
+    const long long currentOffset = 1ll * curRowId * words;
+    for (int word = 0; word < words; ++word) {
+        const uint64_t targetWord = target[targetOffset + word];
+        const uint64_t currentWord = current[currentOffset + word];
+        for (int slot = 0; slot < 8 && word * 8 + slot < seqLen; ++slot) {
+            const int a = decodeDC(targetWord, slot, true);
+            const int b = decodeDC(currentWord, slot, true);
+            if (a >= 20 || b >= 20) continue;
+            const float weight = siteWeights ? siteWeights[word * 8 + slot] : 1.0f;
+            useful += weight;
+            similarity += weight * d_aaSimMatrix[a][b];
+        }
+    }
+}
+
+__device__ void calculateProteinDCParallel(int tarRowId, int curRowId, int seqLen,
+                                           uint64_t* target, uint64_t* current,
+                                           float* siteWeights, float& useful, float& similarity) {
+    const int tx = threadIdx.x;
+    const int words = (seqLen + 7) / 8;
+    const long long targetOffset = 1ll * tarRowId * words;
+    const long long currentOffset = 1ll * curRowId * words;
+    __shared__ float sharedUseful[1024];
+    __shared__ float sharedSimilarity[1024];
+    sharedUseful[tx] = 0.0f;
+    sharedSimilarity[tx] = 0.0f;
+    for (int word = tx; word < words; word += 1024) {
+        const uint64_t targetWord = target[targetOffset + word];
+        const uint64_t currentWord = current[currentOffset + word];
+        for (int slot = 0; slot < 8 && word * 8 + slot < seqLen; ++slot) {
+            const int a = decodeDC(targetWord, slot, true);
+            const int b = decodeDC(currentWord, slot, true);
+            if (a >= 20 || b >= 20) continue;
+            const float weight = siteWeights ? siteWeights[word * 8 + slot] : 1.0f;
+            sharedUseful[tx] += weight;
+            sharedSimilarity[tx] += weight * d_aaSimMatrix[a][b];
+        }
+    }
+    __syncthreads();
+    for (int stride = 512; stride > 0; stride >>= 1) {
+        if (tx < stride) {
+            sharedUseful[tx] += sharedUseful[tx + stride];
+            sharedSimilarity[tx] += sharedSimilarity[tx + stride];
+        }
+        __syncthreads();
+    }
+    if (tx == 0) {
+        useful = sharedUseful[0];
+        similarity = sharedSimilarity[0];
     }
     __syncthreads();
 }
@@ -744,16 +808,28 @@ __global__ void MSADistConstructionDC(
     int seqLen,
     int numSequences,
     int distanceType,
-    bool isProtein
+    bool isProtein,
+    float* siteWeights,
+    float gammaAlpha
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     int idx=tx+bs*bx;
     if(idx>=rowId) return;
     if(distanceType==DIST_UNCORRECTED||distanceType==DIST_JUKESCANTOR){
-        int useful=0, match=0;
-        calculateParamsDC(rowId, idx, seqLen, compressedSeqs, useful, match, isProtein);
-        double uncor = useful > 0 ? 1.0 - double(match) / useful : 0.999999;
+        double uncor;
+        if (isProtein) {
+            float useful=0.0f, similarity=0.0f;
+            calculateProteinDC(rowId, idx, seqLen, compressedSeqs, compressedSeqs, siteWeights, useful, similarity);
+            const double effectiveUseful = useful + 3.0;
+            const double effectiveSimilarity = similarity + 0.45;
+            uncor = 1.0 - effectiveSimilarity / effectiveUseful;
+        } else {
+            int useful=0, match=0;
+            calculateParamsDC(rowId, idx, seqLen, compressedSeqs, useful, match, false);
+            uncor = useful > 0 ? 1.0 - double(match) / useful : 0.999999;
+        }
         if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
+        else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha);
         else dist[idx]=-0.75*log(1.0-uncor/0.75);
         // printf("%d %d %d %d\n",rowId, idx, match, useful);
     }
@@ -797,7 +873,9 @@ __global__ void MSADistConstructionRangeDC(
     int distanceType,
     int st,
     int ed,
-    bool isProtein
+    bool isProtein,
+    float* siteWeights,
+    float gammaAlpha
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     // int idx=tx+bs*bx;
@@ -809,11 +887,16 @@ __global__ void MSADistConstructionRangeDC(
         idx = blockID+st;
     
         if(distanceType==DIST_UNCORRECTED||distanceType==DIST_JUKESCANTOR){
+            float proteinUseful=0.0f, proteinSimilarity=0.0f;
             int useful=0, match=0;
-            calculateParamsDCParallel(rowId, idx, seqLen, compressedSeqs, useful, match, isProtein);
+            if (isProtein) calculateProteinDCParallel(rowId, idx, seqLen, compressedSeqs, compressedSeqs, siteWeights, proteinUseful, proteinSimilarity);
+            else calculateParamsDCParallel(rowId, idx, seqLen, compressedSeqs, useful, match, false);
             if (tx == 0) {
-                double uncor = useful > 0 ? 1.0 - double(match) / useful : 0.999999;
+                double uncor = isProtein
+                    ? 1.0 - (double(proteinSimilarity) + 0.45) / (double(proteinUseful) + 3.0)
+                    : (useful > 0 ? 1.0 - double(match) / useful : 0.999999);
                 if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
+                else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha);
                 else dist[idx]=-0.75*log(1.0-uncor/0.75);
             }
             // printf("%d %d %d %d\n",rowId, idx, match, useful);
@@ -865,7 +948,9 @@ __global__ void MSADistConstructionRangeForClusteringDC(
     int distanceType,
     int st,
     int ed,
-    bool isProtein
+    bool isProtein,
+    float* siteWeights,
+    float gammaAlpha
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     // int idx=tx+bs*bx;
@@ -876,11 +961,16 @@ __global__ void MSADistConstructionRangeForClusteringDC(
         if (blockID >= ed-st) return;
         idx = blockID+st;
         if(distanceType==DIST_UNCORRECTED||distanceType==DIST_JUKESCANTOR){
+            float proteinUseful=0.0f, proteinSimilarity=0.0f;
             int useful=0, match=0;
-            calculateParamsBatchDCParallel(rowId, idx, seqLen, compressedSeqs, compressedSeqsConst,useful, match, isProtein);
+            if (isProtein) calculateProteinDCParallel(rowId, idx, seqLen, compressedSeqs, compressedSeqsConst, siteWeights, proteinUseful, proteinSimilarity);
+            else calculateParamsBatchDCParallel(rowId, idx, seqLen, compressedSeqs, compressedSeqsConst,useful, match, false);
             if (tx == 0) {
-                double uncor = useful > 0 ? 1.0 - double(match) / useful : 0.999999;
+                double uncor = isProtein
+                    ? 1.0 - (double(proteinSimilarity) + 0.45) / (double(proteinUseful) + 3.0)
+                    : (useful > 0 ? 1.0 - double(match) / useful : 0.999999);
                 if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
+                else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha);
                 else dist[idx]=-0.75*log(1.0-uncor/0.75);
             }// printf("%d %d %d %d\n",rowId, idx, match, useful);
         }
@@ -934,7 +1024,9 @@ __global__ void MSADistConstructionSpecialIDDC(
     int numToConstruct,
     int * d_id,
     int * d_leafMap,
-    bool isProtein
+    bool isProtein,
+    float* siteWeights,
+    float gammaAlpha
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     int idx=tx+bs*bx;
@@ -949,10 +1041,18 @@ __global__ void MSADistConstructionSpecialIDDC(
     if (idx > backboneSize) compressedSeqs = compressedSeqsConst;
 
     if(distanceType==DIST_UNCORRECTED||distanceType==DIST_JUKESCANTOR){
-        int useful=0, match=0;
-        calculateParamsBatchDC(rowId, idx_const, seqLen, compressedSeqs, compressedSeqsConst,useful, match, isProtein);
-        double uncor = useful > 0 ? 1.0 - double(match) / useful : 0.999999;
+        double uncor;
+        if (isProtein) {
+            float useful=0.0f, similarity=0.0f;
+            calculateProteinDC(rowId, idx_const, seqLen, compressedSeqs, compressedSeqsConst, siteWeights, useful, similarity);
+            uncor = 1.0 - (double(similarity) + 0.45) / (double(useful) + 3.0);
+        } else {
+            int useful=0, match=0;
+            calculateParamsBatchDC(rowId, idx_const, seqLen, compressedSeqs, compressedSeqsConst,useful, match, false);
+            uncor = useful > 0 ? 1.0 - double(match) / useful : 0.999999;
+        }
         if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
+        else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha);
         else dist[idx]=-0.75*log(1.0-uncor/0.75);
         // printf("%d %d %d %d\n",rowId, idx, match, useful);
     }
@@ -998,7 +1098,9 @@ void MashPlacement::MSADeviceArraysDC::distRangeConstructionOnGpuDC(Param& param
             params.distanceType,
             l,
             r,
-            params.isProtein
+            params.isProtein,
+            d_siteWeights,
+            params.gammaAlpha
         );
     } else {
         MSADistConstructionRangeForClusteringDC <<<1024, 1024>>> (
@@ -1011,7 +1113,9 @@ void MashPlacement::MSADeviceArraysDC::distRangeConstructionOnGpuDC(Param& param
             params.distanceType,
             l,
             r,
-            params.isProtein
+            params.isProtein,
+            d_siteWeights,
+            params.gammaAlpha
         );
     }
 }
@@ -1025,7 +1129,9 @@ void MashPlacement::MSADeviceArraysDC::distConstructionOnGpuForBackboneDC(Param&
         d_seqLen,
         backboneSize,
         params.distanceType,
-        params.isProtein
+        params.isProtein,
+        d_siteWeights,
+        params.gammaAlpha
     );
 }
 
@@ -1038,7 +1144,9 @@ void MashPlacement::MSADeviceArraysDC::distConstructionOnGpuDC(Param& params, in
         d_seqLen,
         backboneSize,
         params.distanceType,
-        params.isProtein
+        params.isProtein,
+        d_siteWeights,
+        params.gammaAlpha
     );
 }
 
@@ -1056,6 +1164,8 @@ void MashPlacement::MSADeviceArraysDC::distSpecialIDConstructionOnGpuDC(Param& p
         numToConstruct,
         d_id,
         d_leafMap,
-        params.isProtein
+        params.isProtein,
+        d_siteWeights,
+        params.gammaAlpha
     );
 }
