@@ -489,6 +489,14 @@ void MashPlacement::PlacementDeviceArrays::printTree(std::vector <std::string> n
         fprintf(stderr, "Gpu_ERROR: cudaMemcpy failed!\n");
         exit(1);
     }
+    auto quoteName = [](const std::string& value) {
+        if (value.empty()) return value;
+        static const char* reserved = " \t\r\n()[]':;,";
+        if (value.find_first_of(reserved) == std::string::npos) return value;
+        std::string quoted = "'";
+        for (char c : value) quoted += (c == '\'' ? "''" : std::string(1, c));
+        return quoted + "'";
+    };
     std::function<void(int,int)> print = [&](int node, int from) {
         // Build pos first, before deciding if this is a leaf or internal node
         std::vector<std::pair<int,int>> pos; // {edge_index, parent_node}
@@ -526,7 +534,7 @@ void MashPlacement::PlacementDeviceArrays::printTree(std::vector <std::string> n
     
         if (pos.empty()) {
             // Leaf node (or degenerate case): just print name
-            output_ << name[node];
+            output_ << quoteName(name[node]);
         } else {
             output_ << "(";
             for (size_t i = 0; i < pos.size(); i++) {

@@ -276,6 +276,14 @@ void MashPlacement::NJDeviceArrays::findNeighbourJoiningTree(std::vector <std::s
         };
         go(ch, L);
     };
+    auto quoteName = [](const std::string& value) {
+        if (value.empty()) return value;
+        static const char* reserved = " \t\r\n()[]':;,";
+        if (value.find_first_of(reserved) == std::string::npos) return value;
+        std::string quoted = "'";
+        for (char c : value) quoted += (c == '\'' ? "''" : std::string(1, c));
+        return quoted + "'";
+    };
     // Output the tree recursively
     std::function<void(int)> print = [&](int node) {
         if (tree[node].size()) {
@@ -294,7 +302,7 @@ void MashPlacement::NJDeviceArrays::findNeighbourJoiningTree(std::vector <std::s
                 output_ << kids[i].second << (i + 1 == kids.size() ? ')' : ',');
             }
         } else {
-            output_ << name[node];
+            output_ << quoteName(name[node]);
         }
     };
     // Root of the tree has an index of d_numSequneces*2-2
@@ -302,4 +310,3 @@ void MashPlacement::NJDeviceArrays::findNeighbourJoiningTree(std::vector <std::s
     // std::cout<<";\n";
     output_<<";\n";
 }
-

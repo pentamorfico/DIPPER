@@ -121,6 +121,16 @@ int dfsExpansionSize(Node* node) {
 }
 
 /** Serialize subtree rooted at node to Newick (with branch lengths). */
+static std::string quoteTreeNewickName(const std::string& name) {
+    if (name.empty()) return name;
+    static const char* reserved = " \t\r\n()[]':;,";
+    if (name.find_first_of(reserved) == std::string::npos) return name;
+    std::string quoted = "'";
+    for (char c : name) quoted += (c == '\'' ? "''" : std::string(1, c));
+    quoted += "'";
+    return quoted;
+}
+
 std::string Tree::getNewickString(Node* node) {
 
     // traversal to print each node subtree size
@@ -131,7 +141,7 @@ std::string Tree::getNewickString(Node* node) {
     std::string newick;
 
     if (traversal.size() == 1) {
-        newick += node->name;
+        newick += quoteTreeNewickName(node->name);
         return newick;
     }
 
@@ -160,7 +170,7 @@ std::string Tree::getNewickString(Node* node) {
             }
             if (n->children.size() == 0) {
 
-                newick += n->name;
+                newick += quoteTreeNewickName(n->name);
 
                 if (branch_length >= 0) {
                     newick += ':';
@@ -176,7 +186,7 @@ std::string Tree::getNewickString(Node* node) {
             for (size_t i = level; i < curr_level; i++) {
                 newick += ')';
 
-                newick += node_stack.top();
+                newick += quoteTreeNewickName(node_stack.top());
 
                 if (branch_length_stack.top() >= 0) {
                     newick += ':';
@@ -187,7 +197,7 @@ std::string Tree::getNewickString(Node* node) {
             }
             if (n->children.size() == 0) {
                 newick += ',';
-                newick += n->name;
+                newick += quoteTreeNewickName(n->name);
 
                 if (branch_length >= 0) {
                     newick += ':';
@@ -202,7 +212,7 @@ std::string Tree::getNewickString(Node* node) {
             if (n->children.size() == 0) {
 
                 newick += ',';
-                newick += n->name;
+                newick += quoteTreeNewickName(n->name);
 
                 if (branch_length >= 0) {
                     newick += ':';
@@ -218,7 +228,7 @@ std::string Tree::getNewickString(Node* node) {
     size_t remaining = node_stack.size();
     for (size_t i = 0; i < remaining; i++) {
         newick += ')';
-        newick += node_stack.top();
+        newick += quoteTreeNewickName(node_stack.top());
 
         if (branch_length_stack.top() >= 0) {
             newick += ':';
