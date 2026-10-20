@@ -36,23 +36,42 @@ float entropyGammaFromEnvironment() {
 }
 
 std::array<float, 400> buildProteinSimilarityMatrix() {
-    std::array<float, 400> matrix{};
-    for (int i = 0; i < 20; ++i) matrix[i * 20 + i] = 1.0f;
-    // DIPPER's protein order is A,C,G,T,D,E,F,H,I,K,L,M,N,P,Q,R,S,V,W,Y.
-    // Positive BLOSUM62/LG-like conservative groups are assigned their
-    // normalized empirical similarity; all other substitutions remain zero.
-    const auto addGroup = [&](std::initializer_list<int> group, float value) {
-        for (int a : group) for (int b : group)
-            if (a != b) matrix[a * 20 + b] = std::max(matrix[a * 20 + b], value);
+    // BLOSUM62 in its standard A,R,N,D,C,Q,E,G,H,I,L,K,M,F,P,S,T,W,Y,V order.
+    static constexpr int blosum[20][20] = {
+        {4,-1,-2,-2,0,-1,-1,0,-2,-1,-1,-1,-1,-2,-1,1,0,-3,-2,0},
+        {-1,5,0,-2,-3,1,0,-2,0,-3,-2,2,-1,-3,-2,-1,-1,-3,-2,-3},
+        {-2,0,6,1,-3,0,0,0,1,-3,-3,0,-2,-3,-2,1,0,-4,-2,-3},
+        {-2,-2,1,6,-3,0,2,-1,-1,-3,-4,-1,-3,-3,-1,0,-1,-4,-3,-3},
+        {0,-3,-3,-3,9,-3,-4,-3,-3,-1,-1,-3,-1,-2,-3,-1,-1,-2,-2,-1},
+        {-1,1,0,0,-3,5,2,-2,0,-3,-2,1,0,-3,-1,0,-1,-2,-1,-2},
+        {-1,0,0,2,-4,2,5,-2,0,-3,-3,1,-2,-3,-1,0,-1,-3,-2,-2},
+        {0,-2,0,-1,-3,-2,-2,6,-2,-4,-4,-2,-3,-3,-2,0,-2,-2,-3,-3},
+        {-2,0,1,-1,-3,0,0,-2,8,-3,-3,-1,-2,-1,-2,-1,-2,-2,2,-3},
+        {-1,-3,-3,-3,-1,-3,-3,-4,-3,4,2,-3,1,0,-3,-2,-1,-3,-1,3},
+        {-1,-2,-3,-4,-1,-2,-3,-4,-3,2,4,-2,2,0,-3,-2,-1,-2,-1,1},
+        {-1,2,0,-1,-3,1,1,-2,-1,-3,-2,5,-1,-3,-1,0,-1,-3,-2,-2},
+        {-1,-1,-2,-3,-1,0,-2,-3,-2,1,2,-1,5,0,-2,-1,-1,-1,-1,1},
+        {-2,-3,-3,-3,-2,-3,-3,-3,-1,0,0,-3,0,6,-4,-2,-2,1,3,-1},
+        {-1,-2,-2,-1,-3,-1,-1,-2,-2,-3,-3,-1,-2,-4,7,-1,-1,-4,-3,-2},
+        {1,-1,1,0,-1,0,0,0,-1,-2,-2,0,-1,-2,-1,4,1,-3,-2,-2},
+        {0,-1,0,-1,-1,-1,-1,-2,-2,-1,-1,-1,-1,-2,-1,1,5,-2,-2,0},
+        {-3,-3,-4,-4,-2,-2,-3,-2,-2,-3,-2,-3,-1,1,-4,-3,-2,11,2,-3},
+        {-2,-2,-2,-3,-2,-1,-2,-3,2,-1,-1,-2,-1,3,-3,-2,-2,2,7,-1},
+        {0,-3,-3,-3,-1,-2,-2,-3,-3,3,1,-2,1,-1,-2,-2,0,-3,-1,4}
     };
-    addGroup({8, 10, 11, 17}, 0.50f); // I,L,M,V
-    addGroup({6, 18, 19}, 0.45f);      // F,W,Y
-    addGroup({4, 5}, 0.42f);           // D,E
-    addGroup({9, 15}, 0.42f);           // K,R
-    addGroup({12, 14}, 0.35f);          // N,Q
-    addGroup({16, 3}, 0.30f);           // S,T (T shares DNA index 3)
-    addGroup({0, 16}, 0.25f);           // A,S
-    addGroup({2, 16}, 0.20f);           // G,S
+    static constexpr int dipperToStandard[20] = {0,4,7,16,3,6,13,8,9,11,10,12,2,14,5,1,15,19,17,18};
+    std::array<float, 400> matrix{};
+    for (int a = 0; a < 20; ++a) {
+        for (int b = 0; b < 20; ++b) {
+            const int score = blosum[dipperToStandard[a]][dipperToStandard[b]];
+            const int diagonalA = blosum[dipperToStandard[a]][dipperToStandard[a]];
+            const int diagonalB = blosum[dipperToStandard[b]][dipperToStandard[b]];
+            matrix[a * 20 + b] = score > 0
+                ? std::min(1.0f, static_cast<float>(score) / std::sqrt(static_cast<float>(diagonalA * diagonalB)))
+                : 0.0f;
+        }
+    }
+    for (int i = 0; i < 20; ++i) matrix[i * 20 + i] = 1.0f;
     return matrix;
 }
 
