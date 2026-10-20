@@ -15,7 +15,9 @@ void MashPlacement::MSADeviceArraysDC::transferToDeviceArraysDC(uint64_t ** h_co
 {
     cudaError_t err;
     
-    size_t maxLengthCompressed = (this->d_seqLen + 15) / 16;
+    size_t maxLengthCompressed = params.isProtein
+        ? (this->d_seqLen + 7) / 8
+        : (this->d_seqLen + 15) / 16;
 
     /* Flatten complete data */
     
@@ -63,7 +65,9 @@ void MashPlacement::MSADeviceArraysDC::allocateDeviceArraysDC(uint64_t ** h_comp
     
     this->d_seqLen = h_seqLengths[0];
     
-    size_t maxLengthCompressed = (this->d_seqLen + 15) / 16;
+    size_t maxLengthCompressed = params.isProtein
+        ? (this->d_seqLen + 7) / 8
+        : (this->d_seqLen + 15) / 16;
 
     err = cudaMalloc(&d_compressedSeqsBackBone, 2*maxLengthCompressed*this->backboneSize*sizeof(uint64_t));
     if (err != cudaSuccess)
