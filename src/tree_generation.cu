@@ -115,6 +115,21 @@ void parseArguments(int argc, char** argv)
         ("protein-murphy8",
         "Use Murphy8 3-bit protein alphabet for raw input (-i r)")
 
+        ("protein-model", po::value<std::string>(),
+        "Protein similarity model: blosum62 (default) or binary")
+
+        ("entropy-gamma", po::value<std::string>(),
+        "Protein entropy weighting gamma (default: 2.0)")
+
+        ("gamma-alpha", po::value<std::string>(),
+        "Protein Gamma shape alpha (default: 0.8)")
+
+        ("protein-saturation", po::value<std::string>(),
+        "Protein saturation asymptote (default: 0.92)")
+
+        ("overlap-prior", po::value<std::string>(),
+        "Protein low-overlap prior weight (default: 3.0)")
+
         ("input-tree,t",       po::value<std::string>(),
         "Input backbone tree (Newick format), required with --add option")
 
@@ -359,6 +374,22 @@ int main(int argc, char** argv) {
     params.useReducedProtein = useReducedProtein;
     params.useMurphy8 = useMurphy8;
     MashPlacement::loadProteinModelEnvironment(params);
+    if (vm.count("protein-model")) {
+        const std::string model = vm["protein-model"].as<std::string>();
+        if (model != "binary" && model != "blosum62") {
+            std::cerr << "ERROR: --protein-model must be binary or blosum62.\n";
+            return 1;
+        }
+        params.proteinBinary = model == "binary";
+    }
+    try { if (vm.count("entropy-gamma")) params.entropyGamma = std::stof(vm["entropy-gamma"].as<std::string>()); } catch (...) { return 1; }
+    try { if (vm.count("gamma-alpha")) params.gammaAlpha = std::stof(vm["gamma-alpha"].as<std::string>()); } catch (...) { return 1; }
+    try { if (vm.count("protein-saturation")) params.proteinSaturation = std::stof(vm["protein-saturation"].as<std::string>()); } catch (...) { return 1; }
+    try { if (vm.count("overlap-prior")) params.lowOverlapPriorWeight = std::stof(vm["overlap-prior"].as<std::string>()); } catch (...) { return 1; }
+    if (params.entropyGamma < 0.0f || params.gammaAlpha <= 0.0f || params.proteinSaturation <= 0.0f || params.lowOverlapPriorWeight < 0.0f) {
+        std::cerr << "ERROR: invalid protein model parameter.\n";
+        return 1;
+    }
 
     if (in == "r" && isProtein && useReducedProtein && k > 32) {
         std::cerr << "ERROR: --protein-reduced supports k-mer size up to 32.\n";

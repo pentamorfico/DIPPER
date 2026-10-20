@@ -179,8 +179,8 @@ __device__ inline int decodeDC(uint64_t word, int slot, bool isProtein) {
     return static_cast<int>((word >> (slot * (isProtein ? 8 : 4))) & (isProtein ? 0xffu : 0xfu));
 }
 
-__device__ inline double gammaProteinDistanceDC(double uncorrected, double alpha) {
-    const double ratio = fmin(0.98, fmax(0.0, uncorrected / 0.92));
+__device__ inline double gammaProteinDistanceDC(double uncorrected, double alpha, double saturation) {
+    const double ratio = fmin(0.98, fmax(0.0, uncorrected / saturation));
     const double value = alpha * (pow(1.0 - ratio, -1.0 / alpha) - 1.0);
     return fmin(3.5, fmax(0.0, value));
 }
@@ -814,7 +814,9 @@ __global__ void MSADistConstructionDC(
     int distanceType,
     bool isProtein,
     float* siteWeights,
-    float gammaAlpha
+    float gammaAlpha,
+    float proteinSaturation,
+    float priorWeight
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     int idx=tx+bs*bx;
@@ -824,8 +826,8 @@ __global__ void MSADistConstructionDC(
         if (isProtein) {
             float useful=0.0f, similarity=0.0f;
             calculateProteinDC(rowId, idx, seqLen, compressedSeqs, compressedSeqs, siteWeights, useful, similarity);
-            const double effectiveUseful = useful + 3.0;
-            const double effectiveSimilarity = similarity + 0.45;
+            const double effectiveUseful = useful + priorWeight;
+            const double effectiveSimilarity = similarity + 0.15 * priorWeight;
             uncor = 1.0 - effectiveSimilarity / effectiveUseful;
         } else {
             int useful=0, match=0;
@@ -833,7 +835,7 @@ __global__ void MSADistConstructionDC(
             uncor = useful > 0 ? 1.0 - double(match) / useful : 0.999999;
         }
         if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
-        else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha);
+        else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha, proteinSaturation);
         else dist[idx]=-0.75*safeLogDistanceArgDC(1.0-uncor/0.75);
         // printf("%d %d %d %d\n",rowId, idx, match, useful);
     }
@@ -883,7 +885,9 @@ __global__ void MSADistConstructionRangeDC(
     int ed,
     bool isProtein,
     float* siteWeights,
-    float gammaAlpha
+    float gammaAlpha,
+    float proteinSaturation,
+    float priorWeight
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     // int idx=tx+bs*bx;
@@ -901,10 +905,10 @@ __global__ void MSADistConstructionRangeDC(
             else calculateParamsDCParallel(rowId, idx, seqLen, compressedSeqs, useful, match, false);
             if (tx == 0) {
                 double uncor = isProtein
-                    ? 1.0 - (double(proteinSimilarity) + 0.45) / (double(proteinUseful) + 3.0)
+                    ? 1.0 - (double(proteinSimilarity) + 0.15 * priorWeight) / (double(proteinUseful) + priorWeight)
                     : (useful > 0 ? 1.0 - double(match) / useful : 0.999999);
                 if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
-                else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha);
+                else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha, proteinSaturation);
                 else dist[idx]=-0.75*log(1.0-uncor/0.75);
             }
             // printf("%d %d %d %d\n",rowId, idx, match, useful);
@@ -914,6 +918,7 @@ __global__ void MSADistConstructionRangeDC(
             double fr[4]={};
             calculateParamsDCParallel_TJ(rowId, idx, seqLen, compressedSeqs, frac, tot, match, pr);
             if (tx == 0){
+                if (tot == 0) { dist[idx] = 0.999999; continue; }
                 for(int i=0;i<4;i++) fr[i]=double(frac[i])/tot/2.0;
                 double h=0;
                 h+=0.5*pr[0]*fr[0]*fr[2];
@@ -929,6 +934,7 @@ __global__ void MSADistConstructionRangeDC(
             int p=0,q=0,tot=0;
             calculateParamsDCParallel_K2P(rowId, idx, seqLen, compressedSeqs, p, q, tot);
             if (tx == 0){
+                if (tot == 0) { dist[idx] = 0.999999; continue; }
                 double pp=double(p)/tot,qq=double(q)/tot;
                 if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*log((1-2*pp-qq)*sqrt(1-2*qq));
                 else dist[idx]=0.5*(1.0/(1-2*pp-qq)+0.5/(1-qq*2)-1.5);
@@ -938,6 +944,7 @@ __global__ void MSADistConstructionRangeDC(
             int p=0,q=0,tot=0,gc1=0,gc2=0;
             calculateParamsDCParallel_TAMURA(rowId, idx, seqLen, compressedSeqs, p, q, tot, gc1, gc2);
             if (tx == 0) {
+                if (tot == 0) { dist[idx] = 0.999999; continue; }
                 double pp=double(p)/tot,qq=double(q)/tot, c=double(gc1)/tot+double(gc2)/tot-2*double(gc1)*double(gc2)/tot/tot;
                 dist[idx]=-c*log(1-pp/c-qq)-0.5*(1-c)*log(1-2*qq);
             }
@@ -958,7 +965,9 @@ __global__ void MSADistConstructionRangeForClusteringDC(
     int ed,
     bool isProtein,
     float* siteWeights,
-    float gammaAlpha
+    float gammaAlpha,
+    float proteinSaturation,
+    float priorWeight
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     // int idx=tx+bs*bx;
@@ -975,10 +984,10 @@ __global__ void MSADistConstructionRangeForClusteringDC(
             else calculateParamsBatchDCParallel(rowId, idx, seqLen, compressedSeqs, compressedSeqsConst,useful, match, false);
             if (tx == 0) {
                 double uncor = isProtein
-                    ? 1.0 - (double(proteinSimilarity) + 0.45) / (double(proteinUseful) + 3.0)
+                    ? 1.0 - (double(proteinSimilarity) + 0.15 * priorWeight) / (double(proteinUseful) + priorWeight)
                     : (useful > 0 ? 1.0 - double(match) / useful : 0.999999);
                 if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
-                else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha);
+                else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha, proteinSaturation);
                 else dist[idx]=-0.75*log(1.0-uncor/0.75);
             }// printf("%d %d %d %d\n",rowId, idx, match, useful);
         }
@@ -987,6 +996,7 @@ __global__ void MSADistConstructionRangeForClusteringDC(
             double fr[4]={};
             calculateParamsBatchDCParallel_TJ(rowId, idx, seqLen, compressedSeqs, compressedSeqsConst, frac, tot, match, pr);
             if (tx == 0) {
+                if (tot == 0) { dist[idx] = 0.999999; continue; }
                 for(int i=0;i<4;i++) fr[i]=double(frac[i])/tot/2.0;
                 double h=0;
                 h+=0.5*pr[0]*fr[0]*fr[2];
@@ -1002,6 +1012,7 @@ __global__ void MSADistConstructionRangeForClusteringDC(
             int p=0,q=0,tot=0;
             calculateParamsBatchDCParallel_K2P(rowId, idx, seqLen, compressedSeqs, compressedSeqsConst, p, q, tot);
             if (tx == 0) {
+                if (tot == 0) { dist[idx] = 0.999999; continue; }
                 double pp=double(p)/tot,qq=double(q)/tot;
                 if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*log((1-2*pp-qq)*sqrt(1-2*qq));
                 else dist[idx]=0.5*(1.0/(1-2*pp-qq)+0.5/(1-qq*2)-1.5);
@@ -1012,6 +1023,7 @@ __global__ void MSADistConstructionRangeForClusteringDC(
             int p=0,q=0,tot=0,gc1=0,gc2=0;
             calculateParamsBatchDCParallel_TAMURA(rowId, idx, seqLen, compressedSeqs, compressedSeqsConst, p, q, tot, gc1, gc2);
             if (tx == 0) {
+                if (tot == 0) { dist[idx] = 0.999999; continue; }
                 double pp=double(p)/tot,qq=double(q)/tot, c=double(gc1)/tot+double(gc2)/tot-2*double(gc1)*double(gc2)/tot/tot;
                 dist[idx]=-c*log(1-pp/c-qq)-0.5*(1-c)*log(1-2*qq);
         
@@ -1034,7 +1046,9 @@ __global__ void MSADistConstructionSpecialIDDC(
     int * d_leafMap,
     bool isProtein,
     float* siteWeights,
-    float gammaAlpha
+    float gammaAlpha,
+    float proteinSaturation,
+    float priorWeight
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     int idx=tx+bs*bx;
@@ -1053,14 +1067,14 @@ __global__ void MSADistConstructionSpecialIDDC(
         if (isProtein) {
             float useful=0.0f, similarity=0.0f;
             calculateProteinDC(rowId, idx_const, seqLen, compressedSeqs, compressedSeqsConst, siteWeights, useful, similarity);
-            uncor = 1.0 - (double(similarity) + 0.45) / (double(useful) + 3.0);
+            uncor = 1.0 - (double(similarity) + 0.15 * priorWeight) / (double(useful) + priorWeight);
         } else {
             int useful=0, match=0;
             calculateParamsBatchDC(rowId, idx_const, seqLen, compressedSeqs, compressedSeqsConst,useful, match, false);
             uncor = useful > 0 ? 1.0 - double(match) / useful : 0.999999;
         }
         if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
-        else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha);
+        else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha, proteinSaturation);
         else dist[idx]=-0.75*log(1.0-uncor/0.75);
         // printf("%d %d %d %d\n",rowId, idx, match, useful);
     }
@@ -1068,6 +1082,7 @@ __global__ void MSADistConstructionSpecialIDDC(
         int frac[4]={},pr[4]={},tot=0,match=0;
         double fr[4]={};
         calculateParamsBatchDC_TJ(rowId, idx_const, seqLen, compressedSeqs, compressedSeqsConst, frac, tot, match, pr);
+        if (tot == 0) { dist[idx] = 0.999999; return; }
         for(int i=0;i<4;i++) fr[i]=double(frac[i])/tot/2.0;
         double h=0;
         h+=0.5*pr[0]*fr[0]*fr[2];
@@ -1081,6 +1096,7 @@ __global__ void MSADistConstructionSpecialIDDC(
     else if(distanceType==DIST_KIMURA2P||distanceType==DIST_JINNEI){
         int p=0,q=0,tot=0;
         calculateParamsBatchDC_K2P(rowId, idx_const, seqLen, compressedSeqs, compressedSeqsConst, p, q, tot);
+        if (tot == 0) { dist[idx] = 0.999999; return; }
         double pp=double(p)/tot,qq=double(q)/tot;
         if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*log((1-2*pp-qq)*sqrt(1-2*qq));
         else dist[idx]=0.5*(1.0/(1-2*pp-qq)+0.5/(1-qq*2)-1.5);
@@ -1088,6 +1104,7 @@ __global__ void MSADistConstructionSpecialIDDC(
     else if(distanceType==DIST_TAMURA){
         int p=0,q=0,tot=0,gc1=0,gc2=0;
         calculateParamsBatchDC_TAMURA(rowId, idx_const, seqLen, compressedSeqs, compressedSeqsConst, p, q, tot, gc1, gc2);
+        if (tot == 0) { dist[idx] = 0.999999; return; }
         double pp=double(p)/tot,qq=double(q)/tot, c=double(gc1)/tot+double(gc2)/tot-2*double(gc1)*double(gc2)/tot/tot;
         dist[idx]=-c*log(1-pp/c-qq)-0.5*(1-c)*log(1-2*qq);
     }
@@ -1108,7 +1125,9 @@ void MashPlacement::MSADeviceArraysDC::distRangeConstructionOnGpuDC(Param& param
             r,
             params.isProtein,
             d_siteWeights,
-            params.gammaAlpha
+            params.gammaAlpha,
+            params.proteinSaturation,
+            params.lowOverlapPriorWeight
         );
     } else {
         MSADistConstructionRangeForClusteringDC <<<1024, 1024>>> (
@@ -1123,7 +1142,9 @@ void MashPlacement::MSADeviceArraysDC::distRangeConstructionOnGpuDC(Param& param
             r,
             params.isProtein,
             d_siteWeights,
-            params.gammaAlpha
+            params.gammaAlpha,
+            params.proteinSaturation,
+            params.lowOverlapPriorWeight
         );
     }
 }
@@ -1139,7 +1160,9 @@ void MashPlacement::MSADeviceArraysDC::distConstructionOnGpuForBackboneDC(Param&
         params.distanceType,
         params.isProtein,
         d_siteWeights,
-        params.gammaAlpha
+        params.gammaAlpha,
+        params.proteinSaturation,
+        params.lowOverlapPriorWeight
     );
 }
 
@@ -1154,7 +1177,9 @@ void MashPlacement::MSADeviceArraysDC::distConstructionOnGpuDC(Param& params, in
         params.distanceType,
         params.isProtein,
         d_siteWeights,
-        params.gammaAlpha
+        params.gammaAlpha,
+        params.proteinSaturation,
+        params.lowOverlapPriorWeight
     );
 }
 
@@ -1174,6 +1199,8 @@ void MashPlacement::MSADeviceArraysDC::distSpecialIDConstructionOnGpuDC(Param& p
         d_leafMap,
         params.isProtein,
         d_siteWeights,
-        params.gammaAlpha
+        params.gammaAlpha,
+        params.proteinSaturation,
+        params.lowOverlapPriorWeight
     );
 }

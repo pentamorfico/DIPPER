@@ -565,7 +565,9 @@ __global__ void MSADistConstruction(
     int distanceType,
     bool isProtein,
     float * siteWeights,
-    float gammaAlpha
+    float gammaAlpha,
+    float proteinSaturation,
+    float priorWeight
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     int idx=tx+bs*bx;
@@ -578,9 +580,9 @@ __global__ void MSADistConstruction(
             calculateParamsParallel(rowId, blockID, seqLen, compressedSeqs, siteWeights, useful, match, isProtein);
             // calculateParams(rowId, idx, seqLen, compressedSeqs, useful, match);
             if (tx == 0) {   
-                const double priorWeight = isProtein ? 3.0 : 0.0;
-                const double priorMatch = isProtein ? 0.15 * priorWeight : 0.0;
-                const double effectiveUseful = double(useful) + priorWeight;
+                const double effectivePrior = isProtein ? priorWeight : 0.0;
+                const double priorMatch = isProtein ? 0.15 * effectivePrior : 0.0;
+                const double effectiveUseful = double(useful) + effectivePrior;
                 const double effectiveMatch = double(match) + priorMatch;
                 double uncor = (effectiveUseful > 0.0)
                     ? (1.0 - effectiveMatch / effectiveUseful) : 0.999;
@@ -589,7 +591,7 @@ __global__ void MSADistConstruction(
                 else {
                     if (isProtein) {
                         const double alpha = gammaAlpha;
-                        const double ratio = min(0.98, max(0.0, uncor / 0.92));
+                        const double ratio = min(0.98, max(0.0, uncor / proteinSaturation));
                         const double gammaDist = alpha * (pow(1.0 - ratio, -1.0 / alpha) - 1.0);
                         dist[blockID] = min(3.5, max(0.0, gammaDist));
                     }
@@ -654,6 +656,8 @@ void MashPlacement::MSADeviceArrays::distConstructionOnGpu(Param& params, int ro
         params.distanceType,
         params.isProtein,
         d_siteWeights,
-        params.gammaAlpha
+        params.gammaAlpha,
+        params.proteinSaturation,
+        params.lowOverlapPriorWeight
     );
 }
