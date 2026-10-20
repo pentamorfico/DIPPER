@@ -15,6 +15,7 @@
 #include <iostream>
 #include <vector>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include "tree.hpp"
 
@@ -40,6 +41,11 @@ namespace MashPlacement
         bool useReducedProtein=false;
         bool useMurphy8=false;
         uint64_t clusterSize=0;
+        bool proteinBinary=false;
+        float entropyGamma=2.0f;
+        float gammaAlpha=0.8f;
+        float proteinSaturation=0.92f;
+        float lowOverlapPriorWeight=3.0f;
 
         Param(uint64_t t_kmerSize, uint64_t t_sketchSize, uint64_t t_threshold, uint64_t t_distanceType, std::string t_in, std::string t_out)
         {
@@ -47,6 +53,20 @@ namespace MashPlacement
             in = t_in, out = t_out; 
         };
     };
+
+    inline void loadProteinModelEnvironment(Param& params) {
+        if (const char* value = std::getenv("DIPPER_ENTROPY_GAMMA")) {
+            char* end = nullptr;
+            const float parsed = std::strtof(value, &end);
+            if (end != value && std::isfinite(parsed) && parsed >= 0.0f) params.entropyGamma = parsed;
+        }
+        if (const char* value = std::getenv("DIPPER_GAMMA_ALPHA")) {
+            char* end = nullptr;
+            const float parsed = std::strtof(value, &end);
+            if (end != value && std::isfinite(parsed) && parsed > 0.0f) params.gammaAlpha = parsed;
+        }
+        if (const char* value = std::getenv("DIPPER_BINARY_AA")) params.proteinBinary = value[0] == '1';
+    }
 
     /** Device arrays for MASH: compressed seqs, prefix/agg lengths, hash list, sketch construction. */
     struct MashDeviceArrays{
@@ -122,8 +142,9 @@ namespace MashPlacement
 
     /** MSA device arrays for DC (backbone vs const, seq len). */
     struct MSADeviceArraysDC{
-        uint64_t * d_compressedSeqsBackBone;
-        uint64_t * d_compressedSeqsConst;
+        uint64_t * d_compressedSeqsBackBone = nullptr;
+        uint64_t * d_compressedSeqsConst = nullptr;
+        float * d_siteWeights = nullptr;
         // uint64_t * d_seqLengths;
         // size_t numSequences;
         int d_seqLen;

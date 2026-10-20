@@ -132,7 +132,7 @@ void MashPlacement::MSADeviceArrays::allocateDeviceArrays(uint64_t ** h_compress
     // GPU calculation.  DNA keeps a null pointer and the kernel uses w=1.
     if (params.isProtein) {
         std::array<float, 400> similarity = buildProteinSimilarityMatrix();
-        if (binaryProteinFromEnvironment()) {
+        if (params.proteinBinary || binaryProteinFromEnvironment()) {
             similarity.fill(0.0f);
             for (int i = 0; i < 20; ++i) similarity[i * 20 + i] = 1.0f;
         }
@@ -141,7 +141,7 @@ void MashPlacement::MSADeviceArrays::allocateDeviceArrays(uint64_t ** h_compress
             fprintf(stderr, "Gpu_ERROR: cudaMemcpyToSymbol for amino-acid matrix failed!\n");
             exit(1);
         }
-        const float gamma = entropyGammaFromEnvironment();
+        const float gamma = params.entropyGamma;
         const int length = seqLen;
         std::vector<std::array<uint32_t, 20>> counts(length);
         for (auto& column : counts) column.fill(0);
@@ -623,6 +623,6 @@ void MashPlacement::MSADeviceArrays::distConstructionOnGpu(Param& params, int ro
         params.distanceType,
         params.isProtein,
         d_siteWeights,
-        gammaAlphaFromEnvironment()
+        params.gammaAlpha
     );
 }

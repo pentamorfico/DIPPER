@@ -358,6 +358,7 @@ int main(int argc, char** argv) {
     params.isProtein = isProtein;
     params.useReducedProtein = useReducedProtein;
     params.useMurphy8 = useMurphy8;
+    MashPlacement::loadProteinModelEnvironment(params);
 
     if (in == "r" && isProtein && useReducedProtein && k > 32) {
         std::cerr << "ERROR: --protein-reduced supports k-mer size up to 32.\n";

@@ -492,6 +492,7 @@ int main(int argc, char** argv) {
 
     MashPlacement::Param params(k, sketchSize, threshold, distanceType, in, out);
     params.isProtein = isProtein;
+    MashPlacement::loadProteinModelEnvironment(params);
 
     if (rename) {
         // Load the tree from the file
