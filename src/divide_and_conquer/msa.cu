@@ -123,15 +123,21 @@ void MashPlacement::MSADeviceArraysDC::deallocateDeviceArraysDC(){
 #define DIST_TAMURA 5
 #define DIST_JINNEI 6
 
+__device__ inline int decodeDC(uint64_t word, int slot, bool isProtein) {
+    return static_cast<int>((word >> (slot * (isProtein ? 8 : 4))) & (isProtein ? 0xffu : 0xfu));
+}
 
-__device__ void calculateParamsDC(int tarRowId, int curRowId, int seqLen, uint64_t * compressedSeqs, int & useful, int & match){
-    int compLen=(seqLen+15)/16;
+
+__device__ void calculateParamsDC(int tarRowId, int curRowId, int seqLen, uint64_t * compressedSeqs, int & useful, int & match, bool isProtein){
+    int slots = isProtein ? 8 : 16;
+    int compLen = isProtein ? (seqLen+7)/8 : (seqLen+15)/16;
     long long px=1ll*curRowId*compLen, py=1ll*tarRowId*compLen;
     for(int i=0;i<compLen;i++){
         long long vt=compressedSeqs[px+i], vc=compressedSeqs[py+i];
-        for(int j=0;j<16&&i*16+j<seqLen;j++){
-            int et=(vt>>(j*4))&15, ec=(vc>>(j*4))&15;
-            if(et<4&&ec<4) {
+        for(int j=0;j<slots&&i*slots+j<seqLen;j++){
+            int et=decodeDC(vt,j,isProtein), ec=decodeDC(vc,j,isProtein);
+            int limit = isProtein ? 20 : 4;
+            if(et<limit&&ec<limit) {
                 useful++;
                 if(et==ec) match++;
             }
@@ -139,9 +145,10 @@ __device__ void calculateParamsDC(int tarRowId, int curRowId, int seqLen, uint64
     }
 }
 
-__device__ void calculateParamsDCParallel(int tarRowId, int curRowId, int seqLen, uint64_t * compressedSeqs, int & useful, int & match){
+__device__ void calculateParamsDCParallel(int tarRowId, int curRowId, int seqLen, uint64_t * compressedSeqs, int & useful, int & match, bool isProtein){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
-    int compLen=(seqLen+15)/16;
+    int slots = isProtein ? 8 : 16;
+    int compLen = isProtein ? (seqLen+7)/8 : (seqLen+15)/16;
     long long px=1ll*curRowId*compLen, py=1ll*tarRowId*compLen;
 
     __shared__ int sharedUseful[1024];
@@ -151,9 +158,10 @@ __device__ void calculateParamsDCParallel(int tarRowId, int curRowId, int seqLen
 
     for(int i=tx;i<compLen;i+=1024){
         long long vt=compressedSeqs[px+i], vc=compressedSeqs[py+i];
-        for(int j=0;j<16&&i*16+j<seqLen;j++){
-            int et=(vt>>(j*4))&15, ec=(vc>>(j*4))&15;
-            if(et<4&&ec<4) {
+        for(int j=0;j<slots&&i*slots+j<seqLen;j++){
+            int et=decodeDC(vt,j,isProtein), ec=decodeDC(vc,j,isProtein);
+            int limit = isProtein ? 20 : 4;
+            if(et<limit&&ec<limit) {
                 sharedUseful[tx]++;
                 if(et==ec) sharedMatch[tx]++;
             }
@@ -178,15 +186,17 @@ __device__ void calculateParamsDCParallel(int tarRowId, int curRowId, int seqLen
     __syncthreads();
 }
 
-__device__ void calculateParamsBatchDC(int tarRowId, int curRowId, int seqLen, uint64_t * compressedSeqs, uint64_t * compressedSeqsConst, int & useful, int & match){
-    int compLen=(seqLen+15)/16;
+__device__ void calculateParamsBatchDC(int tarRowId, int curRowId, int seqLen, uint64_t * compressedSeqs, uint64_t * compressedSeqsConst, int & useful, int & match, bool isProtein){
+    int slots = isProtein ? 8 : 16;
+    int compLen = isProtein ? (seqLen+7)/8 : (seqLen+15)/16;
     long long px=1ll*curRowId*compLen, py=1ll*tarRowId*compLen;
 
     for(int i=0;i<compLen;i++){
         long long vt=compressedSeqs[px+i], vc=compressedSeqsConst[py+i];
-        for(int j=0;j<16&&i*16+j<seqLen;j++){
-            int et=(vt>>(j*4))&15, ec=(vc>>(j*4))&15;
-            if(et<4&&ec<4) {
+        for(int j=0;j<slots&&i*slots+j<seqLen;j++){
+            int et=decodeDC(vt,j,isProtein), ec=decodeDC(vc,j,isProtein);
+            int limit = isProtein ? 20 : 4;
+            if(et<limit&&ec<limit) {
                 useful++;
                 if(et==ec) match++;
             }
@@ -194,9 +204,10 @@ __device__ void calculateParamsBatchDC(int tarRowId, int curRowId, int seqLen, u
     }
 }
 
-__device__ void calculateParamsBatchDCParallel(int tarRowId, int curRowId, int seqLen, uint64_t * compressedSeqs, uint64_t * compressedSeqsConst, int & useful, int & match){
+__device__ void calculateParamsBatchDCParallel(int tarRowId, int curRowId, int seqLen, uint64_t * compressedSeqs, uint64_t * compressedSeqsConst, int & useful, int & match, bool isProtein){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
-    int compLen=(seqLen+15)/16;
+    int slots = isProtein ? 8 : 16;
+    int compLen = isProtein ? (seqLen+7)/8 : (seqLen+15)/16;
     long long px=1ll*curRowId*compLen, py=1ll*tarRowId*compLen;
 
     __shared__ int sharedUseful[1024];
@@ -206,9 +217,10 @@ __device__ void calculateParamsBatchDCParallel(int tarRowId, int curRowId, int s
 
     for(int i=tx;i<compLen;i+=1024){
         long long vt=compressedSeqs[px+i], vc=compressedSeqsConst[py+i];
-        for(int j=0;j<16&&i*16+j<seqLen;j++){
-            int et=(vt>>(j*4))&15, ec=(vc>>(j*4))&15;
-            if(et<4&&ec<4) {
+        for(int j=0;j<slots&&i*slots+j<seqLen;j++){
+            int et=decodeDC(vt,j,isProtein), ec=decodeDC(vc,j,isProtein);
+            int limit = isProtein ? 20 : 4;
+            if(et<limit&&ec<limit) {
                 sharedUseful[tx]++;
                 if(et==ec) sharedMatch[tx]++;
             }
@@ -679,14 +691,15 @@ __global__ void MSADistConstructionDC(
     double * dist,
     int seqLen,
     int numSequences,
-    int distanceType
+    int distanceType,
+    bool isProtein
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     int idx=tx+bs*bx;
     if(idx>=rowId) return;
     if(distanceType==DIST_UNCORRECTED||distanceType==DIST_JUKESCANTOR){
         int useful=0, match=0;
-        calculateParamsDC(rowId, idx, seqLen, compressedSeqs, useful, match);
+        calculateParamsDC(rowId, idx, seqLen, compressedSeqs, useful, match, isProtein);
         double uncor=1-double(match)/useful;
         if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
         else dist[idx]=-0.75*log(1.0-uncor/0.75);
@@ -731,7 +744,8 @@ __global__ void MSADistConstructionRangeDC(
     int numSequences,
     int distanceType,
     int st,
-    int ed
+    int ed,
+    bool isProtein
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     // int idx=tx+bs*bx;
@@ -744,7 +758,7 @@ __global__ void MSADistConstructionRangeDC(
     
         if(distanceType==DIST_UNCORRECTED||distanceType==DIST_JUKESCANTOR){
             int useful=0, match=0;
-            calculateParamsDCParallel(rowId, idx, seqLen, compressedSeqs, useful, match);
+            calculateParamsDCParallel(rowId, idx, seqLen, compressedSeqs, useful, match, isProtein);
             if (tx == 0) {
                 double uncor=1-double(match)/useful;
                 if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
@@ -798,7 +812,8 @@ __global__ void MSADistConstructionRangeForClusteringDC(
     int numSequences,
     int distanceType,
     int st,
-    int ed
+    int ed,
+    bool isProtein
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     // int idx=tx+bs*bx;
@@ -810,7 +825,7 @@ __global__ void MSADistConstructionRangeForClusteringDC(
         idx = blockID+st;
         if(distanceType==DIST_UNCORRECTED||distanceType==DIST_JUKESCANTOR){
             int useful=0, match=0;
-            calculateParamsBatchDCParallel(rowId, idx, seqLen, compressedSeqs, compressedSeqsConst,useful, match);
+            calculateParamsBatchDCParallel(rowId, idx, seqLen, compressedSeqs, compressedSeqsConst,useful, match, isProtein);
             if (tx == 0) {
                 double uncor=1-double(match)/useful;
                 if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
@@ -866,7 +881,8 @@ __global__ void MSADistConstructionSpecialIDDC(
     int distanceType,
     int numToConstruct,
     int * d_id,
-    int * d_leafMap
+    int * d_leafMap,
+    bool isProtein
 ){
     int tx=threadIdx.x, bs=blockDim.x, bx=blockIdx.x;
     int idx=tx+bs*bx;
@@ -882,7 +898,7 @@ __global__ void MSADistConstructionSpecialIDDC(
 
     if(distanceType==DIST_UNCORRECTED||distanceType==DIST_JUKESCANTOR){
         int useful=0, match=0;
-        calculateParamsBatchDC(rowId, idx_const, seqLen, compressedSeqs, compressedSeqsConst,useful, match);
+        calculateParamsBatchDC(rowId, idx_const, seqLen, compressedSeqs, compressedSeqsConst,useful, match, isProtein);
         double uncor=1-double(match)/useful;
         if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
         else dist[idx]=-0.75*log(1.0-uncor/0.75);
@@ -929,7 +945,8 @@ void MashPlacement::MSADeviceArraysDC::distRangeConstructionOnGpuDC(Param& param
             backboneSize,
             params.distanceType,
             l,
-            r
+            r,
+            params.isProtein
         );
     } else {
         MSADistConstructionRangeForClusteringDC <<<1024, 1024>>> (
@@ -941,7 +958,8 @@ void MashPlacement::MSADeviceArraysDC::distRangeConstructionOnGpuDC(Param& param
             backboneSize,
             params.distanceType,
             l,
-            r
+            r,
+            params.isProtein
         );
     }
 }
@@ -954,7 +972,8 @@ void MashPlacement::MSADeviceArraysDC::distConstructionOnGpuForBackboneDC(Param&
         d_mashDist, 
         d_seqLen,
         backboneSize,
-        params.distanceType
+        params.distanceType,
+        params.isProtein
     );
 }
 
@@ -966,7 +985,8 @@ void MashPlacement::MSADeviceArraysDC::distConstructionOnGpuDC(Param& params, in
         d_mashDist, 
         d_seqLen,
         backboneSize,
-        params.distanceType
+        params.distanceType,
+        params.isProtein
     );
 }
 
@@ -983,6 +1003,7 @@ void MashPlacement::MSADeviceArraysDC::distSpecialIDConstructionOnGpuDC(Param& p
         params.distanceType,
         numToConstruct,
         d_id,
-        d_leafMap
+        d_leafMap,
+        params.isProtein
     );
 }
