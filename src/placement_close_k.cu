@@ -646,6 +646,18 @@ void MashPlacement::KPlacementDeviceArrays::deallocateDeviceArrays()
 
 
 void MashPlacement::KPlacementDeviceArrays::printTree(std::vector <std::string> name, std::ofstream& output_){
+    auto quoteName = [](const std::string& n) -> std::string {
+        if (n.empty()) return n;
+        static const char* special = " \t\r\n()[]':;,";
+        if (n.find_first_of(special) == std::string::npos) return n;
+        std::string res = "'";
+        for (char c : n) {
+            if (c == '\'') res += "''";
+            else res += c;
+        }
+        res += "'";
+        return res;
+    };
     int    * h_head = new int[numSequences*2];
     int    * h_e    = new int[numSequences*8];
     int    * h_nxt  = new int[numSequences*8];
@@ -699,7 +711,7 @@ void MashPlacement::KPlacementDeviceArrays::printTree(std::vector <std::string> 
     
         if (pos.empty()) {
             // Leaf node (or degenerate case): just print name
-            output_ << name[node];
+            output_ << quoteName(name[node]);
         } else {
             output_ << "(";
             for (size_t i = 0; i < pos.size(); i++) {
@@ -729,7 +741,7 @@ void MashPlacement::KPlacementDeviceArrays::printTree(std::vector <std::string> 
             }
         }
         // else std::cout<<name[node];
-        else output_<<name[node];
+        else output_<<quoteName(name[node]);
     };
 
     if (!g_printBinaryNewick) {

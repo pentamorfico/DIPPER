@@ -596,9 +596,9 @@ int main(int argc, char** argv) {
             tbb::parallel_for(tbb::blocked_range<int>(0, numSequences), [&](tbb::blocked_range<int> range){
             for (int idx_= range.begin(); idx_ < range.end(); ++idx_) {
                 uint64_t i = static_cast<uint64_t>(idx_);
-                uint64_t fourBitCompressedSize = (seqs[i].size()+15)/16;
+                uint64_t fourBitCompressedSize = isProtein ? (seqs[i].size()+7)/8 : (seqs[i].size()+15)/16;
                 uint64_t * fourBitCompressed = new uint64_t[fourBitCompressedSize];
-                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed);
+                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, isProtein);
 
                 int newId = idMap[i];
                 seqLengths[newId] = seqs[i].size();
@@ -671,9 +671,9 @@ int main(int argc, char** argv) {
         tbb::parallel_for(tbb::blocked_range<int>(0, numSequences), [&](tbb::blocked_range<int> range){
         for (int idx_= range.begin(); idx_ < range.end(); ++idx_) {
             uint64_t i = static_cast<uint64_t>(idx_);
-            uint64_t fourBitCompressedSize = (seqs[i].size()+15)/16;
+            uint64_t fourBitCompressedSize = isProtein ? (seqs[i].size()+7)/8 : (seqs[i].size()+15)/16;
             uint64_t * fourBitCompressed = new uint64_t[fourBitCompressedSize];
-            fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed);
+            fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, isProtein);
 
             seqLengths[i] = seqs[i].size();
             fourBitCompressedSeqs[i] = fourBitCompressed;
@@ -818,9 +818,9 @@ int main(int argc, char** argv) {
             tbb::parallel_for(tbb::blocked_range<int>(0, cpuBatchSize_local), [&](tbb::blocked_range<int> range){
             for (int idx_= range.begin(); idx_ < range.end(); ++idx_) {
                 uint64_t i = static_cast<uint64_t>(idx_);
-                uint64_t fourBitCompressedSize = (seqs[i].size()+15)/16;
+                uint64_t fourBitCompressedSize = isProtein ? (seqs[i].size()+7)/8 : (seqs[i].size()+15)/16;
                 uint64_t * fourBitCompressed = new uint64_t[fourBitCompressedSize];
-                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed);
+                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, isProtein);
 
                 seqLengthsCluster[i] = seqs[i].size();
                 fourBitCompressedSeqsCluster[i] = fourBitCompressed;
@@ -972,9 +972,9 @@ int main(int argc, char** argv) {
         tbb::parallel_for(tbb::blocked_range<int>(0, numSequences), [&](tbb::blocked_range<int> range){
         for (int idx_= range.begin(); idx_ < range.end(); ++idx_) {
             uint64_t i = static_cast<uint64_t>(idx_);
-            uint64_t fourBitCompressedSize = (seqs[i].size()+15)/16;
+            uint64_t fourBitCompressedSize = isProtein ? (seqs[i].size()+7)/8 : (seqs[i].size()+15)/16;
             uint64_t * fourBitCompressed = new uint64_t[fourBitCompressedSize];
-            fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed);
+            fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, isProtein);
 
             seqLengths[ids[i]] = seqs[i].size();
             fourBitCompressedSeqs[ids[i]] = fourBitCompressed;

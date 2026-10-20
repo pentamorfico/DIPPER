@@ -490,9 +490,9 @@ int main(int argc, char** argv) {
                     if (params.range.second > -1) localSeqLength=params.range.second+1;
                     if (params.range.first > 0) localSeqLength-=params.range.first;
                 }
-                uint64_t fourBitCompressedSize = (localSeqLength+15)/16;
+                uint64_t fourBitCompressedSize = isProtein ? (localSeqLength+7)/8 : (localSeqLength+15)/16;
                 uint64_t * fourBitCompressed = new uint64_t[fourBitCompressedSize];
-                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, params.range.first, params.range.second);
+                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, params.range.first, params.range.second, isProtein);
                 int newId = idMap[i];
                 seqLengths[newId] = localSeqLength;
                 fourBitCompressedSeqs[newId] = fourBitCompressed;
@@ -586,9 +586,9 @@ int main(int argc, char** argv) {
                     if (params.range.second > -1) localSeqLength=params.range.second+1;
                     if (params.range.first > 0) localSeqLength-=params.range.first;
                 }
-                uint64_t fourBitCompressedSize = (localSeqLength+15)/16;
+                uint64_t fourBitCompressedSize = isProtein ? (localSeqLength+7)/8 : (localSeqLength+15)/16;
                 uint64_t * fourBitCompressed = new uint64_t[fourBitCompressedSize];
-                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, params.range.first, params.range.second);
+                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, params.range.first, params.range.second, isProtein);
                 
                 seqLengths[ids[i]] = localSeqLength;
                 fourBitCompressedSeqs[ids[i]] = fourBitCompressed;
@@ -749,9 +749,9 @@ int main(int argc, char** argv) {
                     if (params.range.second > -1) localSeqLength=params.range.second+1;
                     if (params.range.first > 0) localSeqLength-=params.range.first;
                 }
-                uint64_t fourBitCompressedSize = (localSeqLength+15)/16;
+                uint64_t fourBitCompressedSize = isProtein ? (localSeqLength+7)/8 : (localSeqLength+15)/16;
                 uint64_t * fourBitCompressed = new uint64_t[fourBitCompressedSize];
-                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, params.range.first, params.range.second);
+                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, params.range.first, params.range.second, isProtein);
                 
                 
                 int newId = idMap[i];
