@@ -1,0 +1,8 @@
+>identical:sample
+ACDEFGHIKLMNPQRS
+>conservative_sample
+ACDEFGHIKLMNPQRT
+>radical(sample)
+WWWWWWWWWWWWWWWW
+>gapped[partial]
+ACDE----KLMN----

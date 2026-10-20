@@ -909,7 +909,7 @@ __global__ void MSADistConstructionRangeDC(
                     : (useful > 0 ? 1.0 - double(match) / useful : 0.999999);
                 if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
                 else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha, proteinSaturation);
-                else dist[idx]=-0.75*log(1.0-uncor/0.75);
+                else dist[idx]=-0.75*safeLogDistanceArgDC(1.0-uncor/0.75);
             }
             // printf("%d %d %d %d\n",rowId, idx, match, useful);
         }
@@ -927,7 +927,7 @@ __global__ void MSADistConstructionRangeDC(
                 h+=0.5*pr[3]*fr[1]*fr[3];
                 double D=double(tot-match)/tot;
                 double b=0.5*(1.0-fr[0]*fr[0]-fr[2]*fr[2]+D*D/h);
-                dist[idx]=-b*log(1.0-D/b);
+                dist[idx]=-b*safeLogDistanceArgDC(1.0-D/b);
             }
         }
         else if(distanceType==DIST_KIMURA2P||distanceType==DIST_JINNEI){
@@ -936,7 +936,7 @@ __global__ void MSADistConstructionRangeDC(
             if (tx == 0){
                 if (tot == 0) { dist[idx] = 0.999999; continue; }
                 double pp=double(p)/tot,qq=double(q)/tot;
-                if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*log((1-2*pp-qq)*sqrt(1-2*qq));
+                if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*safeLogDistanceArgDC((1-2*pp-qq)*sqrt(fmax(0.0,1-2*qq)));
                 else dist[idx]=0.5*(1.0/(1-2*pp-qq)+0.5/(1-qq*2)-1.5);
             }
         }
@@ -946,7 +946,8 @@ __global__ void MSADistConstructionRangeDC(
             if (tx == 0) {
                 if (tot == 0) { dist[idx] = 0.999999; continue; }
                 double pp=double(p)/tot,qq=double(q)/tot, c=double(gc1)/tot+double(gc2)/tot-2*double(gc1)*double(gc2)/tot/tot;
-                dist[idx]=-c*log(1-pp/c-qq)-0.5*(1-c)*log(1-2*qq);
+                c = fmax(c, 1.0e-12);
+                dist[idx]=-c*safeLogDistanceArgDC(1-pp/c-qq)-0.5*(1-c)*safeLogDistanceArgDC(1-2*qq);
             }
         }
         else dist[idx]=0.0;
@@ -988,7 +989,7 @@ __global__ void MSADistConstructionRangeForClusteringDC(
                     : (useful > 0 ? 1.0 - double(match) / useful : 0.999999);
                 if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
                 else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha, proteinSaturation);
-                else dist[idx]=-0.75*log(1.0-uncor/0.75);
+                else dist[idx]=-0.75*safeLogDistanceArgDC(1.0-uncor/0.75);
             }// printf("%d %d %d %d\n",rowId, idx, match, useful);
         }
         else if(distanceType==DIST_TAJIMANEI){
@@ -1005,7 +1006,7 @@ __global__ void MSADistConstructionRangeForClusteringDC(
                 h+=0.5*pr[3]*fr[1]*fr[3];
                 double D=double(tot-match)/tot;
                 double b=0.5*(1.0-fr[0]*fr[0]-fr[2]*fr[2]+D*D/h);
-                dist[idx]=-b*log(1.0-D/b);
+                dist[idx]=-b*safeLogDistanceArgDC(1.0-D/b);
             }
         }
         else if(distanceType==DIST_KIMURA2P||distanceType==DIST_JINNEI){
@@ -1014,7 +1015,7 @@ __global__ void MSADistConstructionRangeForClusteringDC(
             if (tx == 0) {
                 if (tot == 0) { dist[idx] = 0.999999; continue; }
                 double pp=double(p)/tot,qq=double(q)/tot;
-                if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*log((1-2*pp-qq)*sqrt(1-2*qq));
+                if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*safeLogDistanceArgDC((1-2*pp-qq)*sqrt(fmax(0.0,1-2*qq)));
                 else dist[idx]=0.5*(1.0/(1-2*pp-qq)+0.5/(1-qq*2)-1.5);
         
             }
@@ -1025,7 +1026,8 @@ __global__ void MSADistConstructionRangeForClusteringDC(
             if (tx == 0) {
                 if (tot == 0) { dist[idx] = 0.999999; continue; }
                 double pp=double(p)/tot,qq=double(q)/tot, c=double(gc1)/tot+double(gc2)/tot-2*double(gc1)*double(gc2)/tot/tot;
-                dist[idx]=-c*log(1-pp/c-qq)-0.5*(1-c)*log(1-2*qq);
+                c = fmax(c, 1.0e-12);
+                dist[idx]=-c*safeLogDistanceArgDC(1-pp/c-qq)-0.5*(1-c)*safeLogDistanceArgDC(1-2*qq);
         
                 }
         }
@@ -1075,7 +1077,7 @@ __global__ void MSADistConstructionSpecialIDDC(
         }
         if(distanceType==DIST_UNCORRECTED) dist[idx]=uncor;
         else if (isProtein) dist[idx] = gammaProteinDistanceDC(uncor, gammaAlpha, proteinSaturation);
-        else dist[idx]=-0.75*log(1.0-uncor/0.75);
+        else dist[idx]=-0.75*safeLogDistanceArgDC(1.0-uncor/0.75);
         // printf("%d %d %d %d\n",rowId, idx, match, useful);
     }
     else if(distanceType==DIST_TAJIMANEI){
@@ -1091,14 +1093,14 @@ __global__ void MSADistConstructionSpecialIDDC(
         h+=0.5*pr[3]*fr[1]*fr[3];
         double D=double(tot-match)/tot;
         double b=0.5*(1.0-fr[0]*fr[0]-fr[2]*fr[2]+D*D/h);
-        dist[idx]=-b*log(1.0-D/b);
+        dist[idx]=-b*safeLogDistanceArgDC(1.0-D/b);
     }
     else if(distanceType==DIST_KIMURA2P||distanceType==DIST_JINNEI){
         int p=0,q=0,tot=0;
         calculateParamsBatchDC_K2P(rowId, idx_const, seqLen, compressedSeqs, compressedSeqsConst, p, q, tot);
         if (tot == 0) { dist[idx] = 0.999999; return; }
         double pp=double(p)/tot,qq=double(q)/tot;
-        if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*log((1-2*pp-qq)*sqrt(1-2*qq));
+        if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*safeLogDistanceArgDC((1-2*pp-qq)*sqrt(fmax(0.0,1-2*qq)));
         else dist[idx]=0.5*(1.0/(1-2*pp-qq)+0.5/(1-qq*2)-1.5);
     }
     else if(distanceType==DIST_TAMURA){
@@ -1106,7 +1108,8 @@ __global__ void MSADistConstructionSpecialIDDC(
         calculateParamsBatchDC_TAMURA(rowId, idx_const, seqLen, compressedSeqs, compressedSeqsConst, p, q, tot, gc1, gc2);
         if (tot == 0) { dist[idx] = 0.999999; return; }
         double pp=double(p)/tot,qq=double(q)/tot, c=double(gc1)/tot+double(gc2)/tot-2*double(gc1)*double(gc2)/tot/tot;
-        dist[idx]=-c*log(1-pp/c-qq)-0.5*(1-c)*log(1-2*qq);
+        c = fmax(c, 1.0e-12);
+        dist[idx]=-c*safeLogDistanceArgDC(1-pp/c-qq)-0.5*(1-c)*safeLogDistanceArgDC(1-2*qq);
     }
     else dist[idx]=0.0;
 }

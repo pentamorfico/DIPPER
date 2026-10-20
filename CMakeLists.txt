@@ -173,3 +173,7 @@ endif()
 # ---- API examples -----------------------------------------------------------
 # The library integration example is built separately from examples/CMakeLists.txt.
 # See examples/README.md for instructions.
+
+enable_testing()
+add_test(NAME dipper_protein_models_smoke
+         COMMAND ${CMAKE_SOURCE_DIR}/tests/protein_models_smoke.sh)

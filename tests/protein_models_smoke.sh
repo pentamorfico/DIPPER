@@ -13,16 +13,7 @@ fi
 
 # Includes identical, conservative, radical, gapped and partially-overlapping
 # protein pairs. The first identifier exercises Newick quoting.
-cat > "${TMP}/proteins.fa" <<'EOF'
->identical:sample
-ACDEFGHIKLMNPQRS
->conservative sample
-ACDEFGHIKLMNPQRT
->radical(sample)
-WWWWWWWWWWWWWWWW
->gapped[partial]
-ACDE----KLMN----
-EOF
+cp "${ROOT}/tests/data/proteins.fa" "${TMP}/proteins.fa"
 
 run_model() {
     local model="$1"
