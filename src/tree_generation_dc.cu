@@ -860,7 +860,11 @@ int main(int argc, char** argv) {
             
             // Writing seqs to cluster files
             seqReadStart = std::chrono::high_resolution_clock::now();
-            uint64_t fourBitCompressedSize = (seqs[0].size()+15)/16;
+            // Protein residues use one byte per residue in the 64-bit
+            // representation (8 residues/word); DNA uses four bits/base.
+            uint64_t fourBitCompressedSize = isProtein
+                ? (seqs[0].size()+7)/8
+                : (seqs[0].size()+15)/16;
             for (int bc=0; bc<clusterFiles; bc++){
                 
                 std::string filename = dir + "/" + std::to_string(bc) + ".gz";

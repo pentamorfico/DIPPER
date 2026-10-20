@@ -101,8 +101,12 @@ __device__ void calculateParams(int tarRowId, int curRowId, int seqLen, uint64_t
         long long vt=compressedSeqs[px+i], vc=compressedSeqs[py+i];
         for(int j=0;j<16&&i*16+j<seqLen;j++){
             int et=(vt>>(j*4))&15, ec=(vc>>(j*4))&15;
-            if(et<4||ec<4) useful++;
-            if(et<4&&et==ec) match++;
+            // Pairwise deletion: a site is informative only when both
+            // sequences contain an unambiguous nucleotide.
+            if(et<4&&ec<4) {
+                useful++;
+                if(et==ec) match++;
+            }
         }
     }
 }
@@ -495,5 +499,4 @@ void MashPlacement::MSADeviceArrays::distConstructionOnGpu(Param& params, int ro
         params.isProtein
     );
 }
-
 
