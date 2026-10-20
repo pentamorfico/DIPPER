@@ -142,7 +142,7 @@ void parseArguments(int argc, char** argv)
         ("update-bl", "Update branch lengths of a tree with DIPPER-computed distances without changing topology")
 
         ("seed", po::value<std::string>(),
-        "Random seed for tip selection in --update-bl (default: 0)")
+        "Random seed for sequence shuffling and --update-bl sampling (default: 0)")
 
         ("node-dist",           po::value<std::string>(),
         "find distance between a tip into trees, differ by one placement")
@@ -572,7 +572,7 @@ int main(int argc, char** argv) {
         names.resize(numSequences);
         std::vector<int> ids(numSequences);
         for(int i=0;i<numSequences;i++) ids[i]=i;
-        std::mt19937 rnd(time(NULL));
+        std::mt19937 rnd(static_cast<std::mt19937::result_type>(seed));
         std::shuffle(ids.begin(),ids.end(),rnd);
 
 
@@ -811,7 +811,7 @@ int main(int argc, char** argv) {
         names.resize(numSequences);
         std::vector<int> ids(numSequences);
         for(int i=0;i<numSequences;i++) ids[i]=i;
-        std::mt19937 rnd(time(NULL));
+        std::mt19937 rnd(static_cast<std::mt19937::result_type>(seed));
         std::shuffle(ids.begin(),ids.end(),rnd);
 
         /* 4-bit compress aligned sequences (DNA/AA); optionally restrict to --range. */
@@ -975,7 +975,7 @@ int main(int argc, char** argv) {
         names.resize(numSequences);
         std::vector<int> ids(numSequences);
         for(int i=0;i<numSequences;i++) ids[i]=i;
-        std::mt19937 rnd(time(NULL));
+        std::mt19937 rnd(static_cast<std::mt19937::result_type>(seed));
         std::shuffle(ids.begin(),ids.end(),rnd);
 
         /* 2-bit compress unaligned DNA/RNA for MASH sketching. */
