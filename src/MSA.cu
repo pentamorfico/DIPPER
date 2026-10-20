@@ -297,6 +297,14 @@ __device__ void calculateParamsParallel(int tarRowId, int curRowId, int seqLen, 
     __syncthreads();
 }
 
+__device__ inline double safeLogDistanceArg(double value) {
+    return log(fmax(value, 1.0e-12));
+}
+
+__device__ inline double safeDistanceRatio(double value) {
+    return fmin(0.999999999, fmax(0.0, value));
+}
+
 /** Tajima-Nei: base counts frac[4], pair counts pr[4], total and match. */
 __device__ void calculateParams_TJ(int tarRowId, int curRowId, int seqLen, uint64_t * compressedSeqs, int * frac, int &tot, int &match, int * pr){
     int compLen=(seqLen+15)/16;
@@ -585,7 +593,7 @@ __global__ void MSADistConstruction(
                         const double gammaDist = alpha * (pow(1.0 - ratio, -1.0 / alpha) - 1.0);
                         dist[blockID] = min(3.5, max(0.0, gammaDist));
                     }
-                    else dist[blockID]=-0.75*log(1.0-uncor/0.75);
+                else dist[blockID]=-0.75*safeLogDistanceArg(1.0-uncor/0.75);
                 }
             }
         }
@@ -596,6 +604,7 @@ __global__ void MSADistConstruction(
             calculateParamsParallel_TJ(rowId, blockID, seqLen, compressedSeqs, frac, tot, match, pr);
             // __syncthreads();
             if (tx == 0) {
+                if (tot == 0) { dist[blockID] = 0.999999; continue; }
                 for(int i=0;i<4;i++) fr[i]=double(frac[i])/tot/2.0;
                 double h=0;
                 h+=0.5*pr[0]*fr[0]*fr[2];
@@ -604,7 +613,7 @@ __global__ void MSADistConstruction(
                 h+=0.5*pr[3]*fr[1]*fr[3];
                 double D=double(tot-match)/tot;
                 double b=0.5*(1.0-fr[0]*fr[0]-fr[2]*fr[2]+D*D/h);
-                dist[blockID]=-b*log(1.0-D/b);
+                dist[blockID]=-b*safeLogDistanceArg(1.0-D/b);
             }
         }
         else if(distanceType==DIST_KIMURA2P||distanceType==DIST_JINNEI){
@@ -612,8 +621,9 @@ __global__ void MSADistConstruction(
             // calculateParams_K2P(rowId, idx, seqLen, compressedSeqs, p, q, tot);
             calculateParamsParallel_K2P(rowId, blockID, seqLen, compressedSeqs, p, q, tot);
             if (tx == 0) {
+                if (tot == 0) { dist[blockID] = 0.999999; continue; }
                 double pp=double(p)/tot,qq=double(q)/tot;
-                if(distanceType==DIST_KIMURA2P) dist[blockID]=-0.5*log((1-2*pp-qq)*sqrt(1-2*qq));
+                if(distanceType==DIST_KIMURA2P) dist[blockID]=-0.5*safeLogDistanceArg((1-2*pp-qq)*sqrt(fmax(0.0,1-2*qq)));
                 else dist[blockID]=0.5*(1.0/(1-2*pp-qq)+0.5/(1-qq*2)-1.5);
             }
         }
@@ -622,8 +632,10 @@ __global__ void MSADistConstruction(
             // calculateParams_TAMURA(rowId, idx, seqLen, compressedSeqs, p, q, tot, gc1, gc2);
             calculateParamsParallel_TAMURA(rowId, blockID, seqLen, compressedSeqs, p, q, tot, gc1, gc2);
             if (tx == 0) {
+                if (tot == 0) { dist[blockID] = 0.999999; continue; }
                 double pp=double(p)/tot,qq=double(q)/tot, c=double(gc1)/tot+double(gc2)/tot-2*double(gc1)*double(gc2)/tot/tot;
-                dist[blockID]=-c*log(1-pp/c-qq)-0.5*(1-c)*log(1-2*qq);
+                c = fmax(c, 1.0e-12);
+                dist[blockID]=-c*safeLogDistanceArg(1-pp/c-qq)-0.5*(1-c)*safeLogDistanceArg(1-2*qq);
             }
         }
         else dist[blockID]=0.0;
