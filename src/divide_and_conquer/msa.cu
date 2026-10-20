@@ -851,6 +851,7 @@ __global__ void MSADistConstructionDC(
         h+=0.5*pr[2]*fr[1]*fr[2];
         h+=0.5*pr[3]*fr[1]*fr[3];
         double D=double(tot-match)/tot;
+        h = fmax(h, 1.0e-12);
         double b=0.5*(1.0-fr[0]*fr[0]-fr[2]*fr[2]+D*D/h);
         dist[idx]=-b*safeLogDistanceArgDC(1.0-D/b);
     }
@@ -860,7 +861,7 @@ __global__ void MSADistConstructionDC(
         if (tot == 0) { dist[idx] = 0.999999; return; }
         double pp=double(p)/tot,qq=double(q)/tot;
         if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*safeLogDistanceArgDC((1-2*pp-qq)*sqrt(fmax(0.0,1-2*qq)));
-        else dist[idx]=0.5*(1.0/(1-2*pp-qq)+0.5/(1-qq*2)-1.5);
+        else dist[idx]=0.5*(1.0/fmax(1.0e-12, 1-2*pp-qq)+0.5/fmax(1.0e-12, 1-qq*2)-1.5);
     }
     else if(distanceType==DIST_TAMURA){
         int p=0,q=0,tot=0,gc1=0,gc2=0;
@@ -926,6 +927,7 @@ __global__ void MSADistConstructionRangeDC(
                 h+=0.5*pr[2]*fr[1]*fr[2];
                 h+=0.5*pr[3]*fr[1]*fr[3];
                 double D=double(tot-match)/tot;
+                h = fmax(h, 1.0e-12);
                 double b=0.5*(1.0-fr[0]*fr[0]-fr[2]*fr[2]+D*D/h);
                 dist[idx]=-b*safeLogDistanceArgDC(1.0-D/b);
             }
@@ -937,7 +939,7 @@ __global__ void MSADistConstructionRangeDC(
                 if (tot == 0) { dist[idx] = 0.999999; continue; }
                 double pp=double(p)/tot,qq=double(q)/tot;
                 if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*safeLogDistanceArgDC((1-2*pp-qq)*sqrt(fmax(0.0,1-2*qq)));
-                else dist[idx]=0.5*(1.0/(1-2*pp-qq)+0.5/(1-qq*2)-1.5);
+                else dist[idx]=0.5*(1.0/fmax(1.0e-12, 1-2*pp-qq)+0.5/fmax(1.0e-12, 1-qq*2)-1.5);
             }
         }
         else if(distanceType==DIST_TAMURA){
@@ -1005,6 +1007,7 @@ __global__ void MSADistConstructionRangeForClusteringDC(
                 h+=0.5*pr[2]*fr[1]*fr[2];
                 h+=0.5*pr[3]*fr[1]*fr[3];
                 double D=double(tot-match)/tot;
+                h = fmax(h, 1.0e-12);
                 double b=0.5*(1.0-fr[0]*fr[0]-fr[2]*fr[2]+D*D/h);
                 dist[idx]=-b*safeLogDistanceArgDC(1.0-D/b);
             }
@@ -1016,7 +1019,7 @@ __global__ void MSADistConstructionRangeForClusteringDC(
                 if (tot == 0) { dist[idx] = 0.999999; continue; }
                 double pp=double(p)/tot,qq=double(q)/tot;
                 if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*safeLogDistanceArgDC((1-2*pp-qq)*sqrt(fmax(0.0,1-2*qq)));
-                else dist[idx]=0.5*(1.0/(1-2*pp-qq)+0.5/(1-qq*2)-1.5);
+                else dist[idx]=0.5*(1.0/fmax(1.0e-12, 1-2*pp-qq)+0.5/fmax(1.0e-12, 1-qq*2)-1.5);
         
             }
         }
@@ -1092,6 +1095,7 @@ __global__ void MSADistConstructionSpecialIDDC(
         h+=0.5*pr[2]*fr[1]*fr[2];
         h+=0.5*pr[3]*fr[1]*fr[3];
         double D=double(tot-match)/tot;
+        h = fmax(h, 1.0e-12);
         double b=0.5*(1.0-fr[0]*fr[0]-fr[2]*fr[2]+D*D/h);
         dist[idx]=-b*safeLogDistanceArgDC(1.0-D/b);
     }
@@ -1101,7 +1105,7 @@ __global__ void MSADistConstructionSpecialIDDC(
         if (tot == 0) { dist[idx] = 0.999999; return; }
         double pp=double(p)/tot,qq=double(q)/tot;
         if(distanceType==DIST_KIMURA2P) dist[idx]=-0.5*safeLogDistanceArgDC((1-2*pp-qq)*sqrt(fmax(0.0,1-2*qq)));
-        else dist[idx]=0.5*(1.0/(1-2*pp-qq)+0.5/(1-qq*2)-1.5);
+        else dist[idx]=0.5*(1.0/fmax(1.0e-12, 1-2*pp-qq)+0.5/fmax(1.0e-12, 1-qq*2)-1.5);
     }
     else if(distanceType==DIST_TAMURA){
         int p=0,q=0,tot=0,gc1=0,gc2=0;
