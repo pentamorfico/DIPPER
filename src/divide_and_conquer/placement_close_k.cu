@@ -701,6 +701,21 @@ void MashPlacement::KPlacementDeviceArraysDC::printTreeDC(std::vector <std::stri
     }
 
     
+    auto printName = [&](int node) {
+        const std::string& raw = name[node];
+        const bool quote = raw.find_first_of(":(),;[]' ") != std::string::npos;
+        if (!quote) {
+            output_ << raw;
+            return;
+        }
+        output_ << '\'';
+        for (char ch : raw) {
+            if (ch == '\'') output_ << "''";
+            else output_ << ch;
+        }
+        output_ << '\'';
+    };
+
     std::function<void(int,int)> print = [&](int node, int from) {
         // Build pos first, before deciding if this is a leaf or internal node
         std::vector<std::pair<int,int>> pos; // {edge_index, parent_node}
@@ -738,7 +753,7 @@ void MashPlacement::KPlacementDeviceArraysDC::printTreeDC(std::vector <std::stri
     
         if (pos.empty()) {
             // Leaf node (or degenerate case): just print name
-            output_ << name[node];
+            printName(node);
         } else {
             output_ << "(";
             for (size_t i = 0; i < pos.size(); i++) {
@@ -768,7 +783,7 @@ void MashPlacement::KPlacementDeviceArraysDC::printTreeDC(std::vector <std::stri
             }
         }
         // else std::cout<<name[node];
-        else output_<<name[node];
+        else printName(node);
     };
 
     if (!g_printBinaryNewick) {
@@ -1030,7 +1045,9 @@ void MashPlacement::KPlacementDeviceArraysDC::findClustersDC(
         if (params.in == "r") 
             err = cudaMemcpy(mashDeviceArrays.d_hashListConst, mashDeviceArrays.h_hashList+i*params.sketchSize, localBatchSize*params.sketchSize*sizeof(uint64_t),cudaMemcpyHostToDevice);
         else if (params.in == "m"){
-            size_t maxLengthCompressed = (msaDeviceArrays.d_seqLen + 15) / 16;
+            const size_t maxLengthCompressed = params.isProtein
+                ? (msaDeviceArrays.d_seqLen + 7) / 8
+                : (msaDeviceArrays.d_seqLen + 15) / 16;
             err = cudaMemcpy(msaDeviceArrays.d_compressedSeqsConst, msaDeviceArrays.h_compressedSeqs+i*maxLengthCompressed, 1ll*localBatchSize*maxLengthCompressed*sizeof(uint64_t),cudaMemcpyHostToDevice);
         }
         else {
@@ -1376,7 +1393,9 @@ void transferMsaClusterInfoDC(
     std::vector<int> leafList,
     MashPlacement::Param& params
 ){
-    size_t maxLengthCompressed = (mashDeviceArrays.d_seqLen + 15) / 16;
+    const size_t maxLengthCompressed = params.isProtein
+        ? (mashDeviceArrays.d_seqLen + 7) / 8
+        : (mashDeviceArrays.d_seqLen + 15) / 16;
     uint64_t * compressedSeqs_local = new uint64_t[params.backboneSize*maxLengthCompressed];
     uint64_t * compressedSeqs = mashDeviceArrays.h_compressedSeqs;
 
@@ -1401,7 +1420,9 @@ void transferMsaClusterInfoDCRecursiveBackbone(
     std::vector<int> leafList,
     MashPlacement::Param& params
 ){
-    size_t maxLengthCompressed = (mashDeviceArrays.d_seqLen + 15) / 16;
+    const size_t maxLengthCompressed = params.isProtein
+        ? (mashDeviceArrays.d_seqLen + 7) / 8
+        : (mashDeviceArrays.d_seqLen + 15) / 16;
     uint64_t * compressedSeqs_local = new uint64_t[params.backboneSize*maxLengthCompressed];
     uint64_t * compressedSeqs = mashDeviceArrays.h_compressedSeqs;
 
@@ -1842,7 +1863,9 @@ void MashPlacement::KPlacementDeviceArraysDC::findClusterTreeDC_batch(
         /* Read all sequences in the file*/
         std::string path = dir + "/" + std::to_string(bc) + ".gz";
         std::cerr << "Reading file: " << path << " with " << seqInFile << " sequences\n";
-        size_t maxLengthCompressed = (msaDeviceArrays.d_seqLen + 15) / 16;
+        const size_t maxLengthCompressed = params.isProtein
+            ? (msaDeviceArrays.d_seqLen + 7) / 8
+            : (msaDeviceArrays.d_seqLen + 15) / 16;
         uint64_t * compressedSeqs_local = new uint64_t[seqInFile*maxLengthCompressed];
 
         gzFile file = gzopen(path.c_str(), "rb");

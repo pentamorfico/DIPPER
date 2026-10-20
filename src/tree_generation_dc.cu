@@ -749,7 +749,9 @@ int main(int argc, char** argv) {
             std::cerr << "Backbone tree created in: " <<  createTreeTime.count()/1000000 << " ms" << std::endl;
         }});
 
-        maxLengthCompressed=(seqLengths[0]+15)/16;
+        maxLengthCompressed = isProtein
+            ? (seqLengths[0] + 7) / 8
+            : (seqLengths[0] + 15) / 16;
 
         
         /* Delete pointers */

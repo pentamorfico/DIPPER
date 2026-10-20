@@ -38,20 +38,27 @@ if cmp -s "${TMP}/blosum62.nwk" "${TMP}/binary.nwk"; then
     exit 1
 fi
 
-# Force the divide-and-conquer path.  This specifically guards initialization
-# of the constant-memory amino-acid matrix: when it is left at CUDA's zero
-# initialization, every binary p-distance becomes 1 and this radical branch
-# no longer has the expected high distance.
+# Force the divide-and-conquer path.  Besides constant-memory initialization,
+# this exercises the host-to-device batch copy used for taxa outside the
+# backbone (protein rows contain eight residues per uint64_t, not sixteen).
 "${DIPPER}" --protein --protein-model binary --entropy-gamma 0 \
     --overlap-prior 0 -i m -o t -d 1 -m 3 --max-cluster-size 3 \
-    -I "${ROOT}/tests/data/proteins_sanitized.fa" -O "${TMP}/dc-binary.nwk" \
+    -I "${ROOT}/tests/data/proteins.fa" -O "${TMP}/dc-binary.nwk" \
     >"${TMP}/dc-binary.log" 2>&1
 test -s "${TMP}/dc-binary.nwk"
 ! grep -Eiq 'nan|inf' "${TMP}/dc-binary.nwk"
-grep -Eq 'radical_sample:0\.(8|9)[0-9]*' "${TMP}/dc-binary.nwk" || {
-    echo "DC protein matrix appears uninitialized:" >&2
+grep -q "'identical:sample'" "${TMP}/dc-binary.nwk" || {
+    echo "DC Newick did not quote reserved leaf names:" >&2
     cat "${TMP}/dc-binary.nwk" >&2
     exit 1
 }
+"${DIPPER}" --protein --protein-model blosum62 --entropy-gamma 0 \
+    --overlap-prior 0 -i m -o t -d 1 -m 3 --max-cluster-size 3 \
+    -I "${ROOT}/tests/data/proteins.fa" -O "${TMP}/dc-blosum62.nwk" \
+    >"${TMP}/dc-blosum62.log" 2>&1
+if cmp -s "${TMP}/dc-binary.nwk" "${TMP}/dc-blosum62.nwk"; then
+    echo "DC binary and BLOSUM62 unexpectedly produced identical output" >&2
+    exit 1
+fi
 
 echo "protein model smoke tests passed"
