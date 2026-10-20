@@ -24,6 +24,8 @@
 #include <array>
 #include <cmath>
 
+__constant__ float d_aaSimMatrix[20][20];
+
 namespace {
 float entropyGammaFromEnvironment() {
     const char* value = std::getenv("DIPPER_ENTROPY_GAMMA");
@@ -32,8 +34,6 @@ float entropyGammaFromEnvironment() {
     float gamma = std::strtof(value, &end);
     return (end != value && std::isfinite(gamma) && gamma >= 0.0f) ? gamma : 2.0f;
 }
-
-__constant__ float d_aaSimMatrix[20][20];
 
 std::array<float, 400> buildProteinSimilarityMatrix() {
     std::array<float, 400> matrix{};

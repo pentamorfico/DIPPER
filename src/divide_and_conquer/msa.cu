@@ -10,6 +10,55 @@
 #include <chrono>
 #include <iostream>
 #include <cub/cub.cuh>
+#include <array>
+#include <vector>
+#include <algorithm>
+#include <cstdlib>
+#include <cmath>
+
+extern __constant__ float d_aaSimMatrix[20][20];
+
+namespace {
+void allocateDCProteinWeights(MashPlacement::MSADeviceArraysDC& arrays,
+                              uint64_t** sequences, uint64_t* lengths,
+                              size_t count, const MashPlacement::Param& params) {
+    if (!params.isProtein || params.entropyGamma == 0.0f) return;
+    const int length = arrays.d_seqLen;
+    std::vector<std::array<uint32_t, 20>> counts(length);
+    for (auto& column : counts) column.fill(0);
+    for (size_t row = 0; row < count; ++row) {
+        const size_t words = (length + 7) / 8;
+        for (size_t word = 0; word < words; ++word) {
+            const uint64_t packed = sequences[row][word];
+            for (int slot = 0; slot < 8; ++slot) {
+                const int column = static_cast<int>(word * 8 + slot);
+                if (column >= length) break;
+                const uint8_t aa = static_cast<uint8_t>((packed >> (slot * 8)) & 0xffu);
+                if (aa < 20) ++counts[column][aa];
+            }
+        }
+    }
+    std::vector<float> weights(((length + 7) / 8) * 8, 0.0f);
+    constexpr float invLog20 = 1.0f / 2.995732273553991f;
+    for (int column = 0; column < length; ++column) {
+        uint32_t total = 0;
+        for (uint32_t value : counts[column]) total += value;
+        float entropy = 0.0f;
+        if (total > 0) {
+            for (uint32_t value : counts[column]) {
+                if (value == 0) continue;
+                const float frequency = static_cast<float>(value) / total;
+                entropy -= frequency * std::log(frequency);
+            }
+        }
+        weights[column] = std::exp(-params.entropyGamma * std::min(1.0f, entropy * invLog20));
+    }
+    cudaError_t err = cudaMalloc(&arrays.d_siteWeights, weights.size() * sizeof(float));
+    if (err != cudaSuccess) { fprintf(stderr, "Gpu_ERROR: DC site-weight allocation failed!\n"); exit(1); }
+    err = cudaMemcpy(arrays.d_siteWeights, weights.data(), weights.size() * sizeof(float), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) { fprintf(stderr, "Gpu_ERROR: DC site-weight copy failed!\n"); exit(1); }
+}
+}
 
 void MashPlacement::MSADeviceArraysDC::transferToDeviceArraysDC(uint64_t ** h_compressedSeqs, uint64_t * h_seqLengths, size_t num, int gpuCluster, Param& params)
 {
@@ -105,12 +154,15 @@ void MashPlacement::MSADeviceArraysDC::allocateDeviceArraysDC(uint64_t ** h_comp
         exit(1);
     }
 
+    allocateDCProteinWeights(*this, h_compressedSeqs, h_seqLengths, num, params);
+
     cudaDeviceSynchronize();
 }
 
 void MashPlacement::MSADeviceArraysDC::deallocateDeviceArraysDC(){
     cudaFree(d_compressedSeqsBackBone);
     cudaFree(d_compressedSeqsConst);
+    cudaFree(d_siteWeights);
     // cudaFree(d_seqLengths);
     // cudaFree(d_hashList);
     // cudaFree(d_mashDist);
