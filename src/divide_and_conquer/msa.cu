@@ -113,6 +113,8 @@ void MashPlacement::MSADeviceArraysDC::allocateDeviceArraysDC(uint64_t ** h_comp
     this->backboneSize = params.backboneSize;
     
     this->d_seqLen = h_seqLengths[0];
+
+    if (params.isProtein) initializeProteinSimilarityMatrix(params);
     
     size_t maxLengthCompressed = params.isProtein
         ? (this->d_seqLen + 7) / 8

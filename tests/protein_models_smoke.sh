@@ -38,4 +38,20 @@ if cmp -s "${TMP}/blosum62.nwk" "${TMP}/binary.nwk"; then
     exit 1
 fi
 
+# Force the divide-and-conquer path.  This specifically guards initialization
+# of the constant-memory amino-acid matrix: when it is left at CUDA's zero
+# initialization, every binary p-distance becomes 1 and this radical branch
+# no longer has the expected high distance.
+"${DIPPER}" --protein --protein-model binary --entropy-gamma 0 \
+    --overlap-prior 0 -i m -o t -d 1 -m 3 --max-cluster-size 3 \
+    -I "${ROOT}/tests/data/proteins_sanitized.fa" -O "${TMP}/dc-binary.nwk" \
+    >"${TMP}/dc-binary.log" 2>&1
+test -s "${TMP}/dc-binary.nwk"
+! grep -Eiq 'nan|inf' "${TMP}/dc-binary.nwk"
+grep -Eq 'radical_sample:0\.(8|9)[0-9]*' "${TMP}/dc-binary.nwk" || {
+    echo "DC protein matrix appears uninitialized:" >&2
+    cat "${TMP}/dc-binary.nwk" >&2
+    exit 1
+}
+
 echo "protein model smoke tests passed"

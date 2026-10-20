@@ -624,7 +624,8 @@ int main(int argc, char** argv) {
                 uint64_t i = static_cast<uint64_t>(idx_);
                 uint64_t fourBitCompressedSize = isProtein ? (seqs[i].size()+7)/8 : (seqs[i].size()+15)/16;
                 uint64_t * fourBitCompressed = new uint64_t[fourBitCompressedSize];
-                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, isProtein);
+                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed,
+                                  params.range.first, params.range.second, isProtein);
 
                 int newId = idMap[i];
                 seqLengths[newId] = seqs[i].size();
@@ -699,7 +700,8 @@ int main(int argc, char** argv) {
             uint64_t i = static_cast<uint64_t>(idx_);
             uint64_t fourBitCompressedSize = isProtein ? (seqs[i].size()+7)/8 : (seqs[i].size()+15)/16;
             uint64_t * fourBitCompressed = new uint64_t[fourBitCompressedSize];
-            fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, isProtein);
+            fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed,
+                              params.range.first, params.range.second, isProtein);
 
             seqLengths[i] = seqs[i].size();
             fourBitCompressedSeqs[i] = fourBitCompressed;
@@ -846,7 +848,8 @@ int main(int argc, char** argv) {
                 uint64_t i = static_cast<uint64_t>(idx_);
                 uint64_t fourBitCompressedSize = isProtein ? (seqs[i].size()+7)/8 : (seqs[i].size()+15)/16;
                 uint64_t * fourBitCompressed = new uint64_t[fourBitCompressedSize];
-                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, isProtein);
+                fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed,
+                                  params.range.first, params.range.second, isProtein);
 
                 seqLengthsCluster[i] = seqs[i].size();
                 fourBitCompressedSeqsCluster[i] = fourBitCompressed;
@@ -1004,7 +1007,8 @@ int main(int argc, char** argv) {
             uint64_t i = static_cast<uint64_t>(idx_);
             uint64_t fourBitCompressedSize = isProtein ? (seqs[i].size()+7)/8 : (seqs[i].size()+15)/16;
             uint64_t * fourBitCompressed = new uint64_t[fourBitCompressedSize];
-            fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed, isProtein);
+            fourBitCompressor(seqs[i], seqs[i].size(), fourBitCompressed,
+                              params.range.first, params.range.second, isProtein);
 
             seqLengths[ids[i]] = seqs[i].size();
             fourBitCompressedSeqs[ids[i]] = fourBitCompressed;

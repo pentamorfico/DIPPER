@@ -89,6 +89,23 @@ bool binaryProteinFromEnvironment() {
 }
 }
 
+void MashPlacement::initializeProteinSimilarityMatrix(const Param& params) {
+    std::array<float, 400> similarity = buildProteinSimilarityMatrix();
+    if (params.proteinBinary || binaryProteinFromEnvironment()) {
+        similarity.fill(0.0f);
+        for (int i = 0; i < 20; ++i) similarity[i * 20 + i] = 1.0f;
+    }
+    const cudaError_t err = cudaMemcpyToSymbol(
+        d_aaSimMatrix,
+        similarity.data(),
+        similarity.size() * sizeof(float)
+    );
+    if (err != cudaSuccess) {
+        fprintf(stderr, "Gpu_ERROR: cudaMemcpyToSymbol for amino-acid matrix failed!\n");
+        exit(1);
+    }
+}
+
 void MashPlacement::MSADeviceArrays::allocateDeviceArrays(uint64_t ** h_compressedSeqs, uint64_t * h_seqLengths, size_t num, Param& params)
 {
     cudaError_t err;
@@ -150,16 +167,7 @@ void MashPlacement::MSADeviceArrays::allocateDeviceArrays(uint64_t ** h_compress
     // are computed once from the complete MSA and reused by every pairwise
     // GPU calculation.  DNA keeps a null pointer and the kernel uses w=1.
     if (params.isProtein) {
-        std::array<float, 400> similarity = buildProteinSimilarityMatrix();
-        if (params.proteinBinary || binaryProteinFromEnvironment()) {
-            similarity.fill(0.0f);
-            for (int i = 0; i < 20; ++i) similarity[i * 20 + i] = 1.0f;
-        }
-        err = cudaMemcpyToSymbol(d_aaSimMatrix, similarity.data(), similarity.size() * sizeof(float));
-        if (err != cudaSuccess) {
-            fprintf(stderr, "Gpu_ERROR: cudaMemcpyToSymbol for amino-acid matrix failed!\n");
-            exit(1);
-        }
+        initializeProteinSimilarityMatrix(params);
         const float gamma = params.entropyGamma;
         const int length = seqLen;
         std::vector<std::array<uint32_t, 20>> counts(length);

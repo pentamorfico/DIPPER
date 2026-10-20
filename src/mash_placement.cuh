@@ -68,6 +68,11 @@ namespace MashPlacement
         if (const char* value = std::getenv("DIPPER_BINARY_AA")) params.proteinBinary = value[0] == '1';
     }
 
+    /** Load the selected amino-acid similarity model into constant memory on
+     *  the currently selected CUDA device.  Each GPU has its own constant
+     *  memory, so every normal/DC allocation path must call this once. */
+    void initializeProteinSimilarityMatrix(const Param& params);
+
     /** Device arrays for MASH: compressed seqs, prefix/agg lengths, hash list, sketch construction. */
     struct MashDeviceArrays{
         uint64_t * d_compressedSeqs;
