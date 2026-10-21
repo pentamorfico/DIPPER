@@ -17,6 +17,7 @@
 #include <thrust/reduce.h>
 #include <thrust/execution_policy.h>
 #include <cmath>
+#include <cfloat>
 
 __global__ void fillDismatrix(int numSequences, double* d_mashDist){
     int tx=threadIdx.x, bx=blockIdx.x;
@@ -430,7 +431,7 @@ void MashPlacement::buildNJSeedTreeOnGpu(
         &outEdgeIdx,
         12);
 
-    std::vector<double> h_closest_dis(numClosestAlloc, 2.0);
+    std::vector<double> h_closest_dis(numClosestAlloc, DBL_MAX);
     std::vector<int> h_closest_id(numClosestAlloc, -1);
     std::vector<int> q_id(numNodesAlloc);
     std::vector<int> q_from(numNodesAlloc);

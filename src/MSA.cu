@@ -20,6 +20,7 @@
 #include <cub/cub.cuh>
 #include <cstdlib>
 #include <algorithm>
+#include <numeric>
 #include <vector>
 #include <array>
 #include <cmath>
@@ -685,6 +686,87 @@ void MashPlacement::MSADeviceArrays::distConstructionOnGpu(Param& params, int ro
 
 namespace {
 
+constexpr int kAttnDim = 128;      // 64 strided columns * 2 top BLOSUM62 Principal Components
+constexpr int kAttnVec4 = 32;      // kAttnDim / 4
+constexpr int kAttnTopK = 16;      // Top-K attention targets per query node
+constexpr int kAttnTile = 64;      // 64 * 32 * 16B = 32 KB shared memory per block
+
+__global__ void profileAttentionTopKKernel(
+    int numQueries,
+    int numKeys,
+    const float4* __restrict__ d_queries,
+    const float4* __restrict__ d_keys,
+    int* __restrict__ d_topK
+) {
+    __shared__ float4 s_keys[kAttnTile][kAttnVec4];
+
+    const int qIdx = blockIdx.x * blockDim.x + threadIdx.x;
+    const bool validQ = (qIdx < numQueries);
+
+    float4 qVec[kAttnVec4];
+    if (validQ) {
+        const float4* qPtr = d_queries + static_cast<size_t>(qIdx) * kAttnVec4;
+        #pragma unroll
+        for (int f = 0; f < kAttnVec4; ++f) {
+            qVec[f] = qPtr[f];
+        }
+    }
+
+    float bestSim[kAttnTopK];
+    int bestIdx[kAttnTopK];
+    #pragma unroll
+    for (int k = 0; k < kAttnTopK; ++k) {
+        bestSim[k] = -1e30f;
+        bestIdx[k] = -1;
+    }
+
+    for (int tileBase = 0; tileBase < numKeys; tileBase += kAttnTile) {
+        for (int idx = threadIdx.x; idx < kAttnTile * kAttnVec4; idx += blockDim.x) {
+            const int t = idx / kAttnVec4;
+            const int f = idx % kAttnVec4;
+            const int kGlobal = tileBase + t;
+            if (kGlobal < numKeys) {
+                s_keys[t][f] = d_keys[static_cast<size_t>(kGlobal) * kAttnVec4 + f];
+            } else {
+                s_keys[t][f] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+            }
+        }
+        __syncthreads();
+
+        if (validQ) {
+            const int limit = min(kAttnTile, numKeys - tileBase);
+            for (int t = 0; t < limit; ++t) {
+                const int kGlobal = tileBase + t;
+                float dot = 0.0f;
+                #pragma unroll
+                for (int f = 0; f < kAttnVec4; ++f) {
+                    const float4 kv = s_keys[t][f];
+                    dot += qVec[f].x * kv.x + qVec[f].y * kv.y + qVec[f].z * kv.z + qVec[f].w * kv.w;
+                }
+                if (dot > bestSim[kAttnTopK - 1]) {
+                    int pos = kAttnTopK - 1;
+                    while (pos > 0 && dot > bestSim[pos - 1]) {
+                        bestSim[pos] = bestSim[pos - 1];
+                        bestIdx[pos] = bestIdx[pos - 1];
+                        --pos;
+                    }
+                    bestSim[pos] = dot;
+                    bestIdx[pos] = kGlobal;
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    if (validQ) {
+        int* out = d_topK + static_cast<size_t>(qIdx) * kAttnTopK;
+        #pragma unroll
+        for (int k = 0; k < kAttnTopK; ++k) {
+            out[k] = bestIdx[k];
+        }
+    }
+}
+
 struct BinaryTreeNode {
     int origId = -1;
     int child[2] = {-1, -1}; // >= 0: internal node index (0..M-1); < 0: -(leafIdx + 1)
@@ -694,6 +776,17 @@ struct BinaryTreeNode {
 struct PrecomputedQuartet {
     double dAB = 0.0, dCD = 0.0, dAC = 0.0, dBD = 0.0, dAD = 0.0, dBC = 0.0;
     bool valid = false;
+};
+
+struct TeleportMove {
+    double gain = 0.0;
+    int u = -1;
+    int iv = -1;
+    int x = -1;
+    int ic = -1;
+    double newLenUX = 0.0;
+    double newLenUP = 0.0;
+    double newLenUC = 0.0;
 };
 
 void runProfileBMENNI(std::vector<BinaryTreeNode>& nodes, int maxRounds) {
@@ -709,22 +802,64 @@ void runProfileBMENNI(std::vector<BinaryTreeNode>& nodes, int maxRounds) {
     const auto& params = MashPlacement::g_msaContext.params;
     const auto& siteWeights = MashPlacement::g_msaContext.h_siteWeights;
 
-    // 1. Build 20x20 similarity matrix and exact Cholesky factor Q (S = Q * Q^T).
+    // 1. Build 20x20 similarity matrix and sorted spectral factor Q (S = Q * Q^T),
+    // where Q[aa][0] and Q[aa][1] are the top-2 Principal Components of BLOSUM62.
     std::array<float, 400> sim = buildProteinSimilarityMatrix();
     if (params.proteinBinary || binaryProteinFromEnvironment()) {
         sim.fill(0.0f);
         for (int i = 0; i < 20; ++i) sim[i * 20 + i] = 1.0f;
     }
-    float Q[20][20] = {};
+    double A[20][20];
+    double V[20][20];
     for (int i = 0; i < 20; ++i) {
-        for (int j = 0; j <= i; ++j) {
-            double sum = sim[i * 20 + j];
-            for (int k = 0; k < j; ++k) sum -= static_cast<double>(Q[i][k]) * Q[j][k];
-            if (i == j) {
-                Q[i][i] = (sum > 1e-9) ? static_cast<float>(std::sqrt(sum)) : 0.0f;
-            } else if (Q[j][j] > 1e-9f) {
-                Q[i][j] = static_cast<float>(sum / Q[j][j]);
+        for (int j = 0; j < 20; ++j) {
+            A[i][j] = sim[i * 20 + j];
+            V[i][j] = (i == j) ? 1.0 : 0.0;
+        }
+    }
+    for (int sweep = 0; sweep < 60; ++sweep) {
+        double maxOff = 0.0;
+        for (int p = 0; p < 20; ++p)
+            for (int q = p + 1; q < 20; ++q)
+                maxOff = std::max(maxOff, std::abs(A[p][q]));
+        if (maxOff < 1e-13) break;
+        for (int p = 0; p < 20; ++p) {
+            for (int q = p + 1; q < 20; ++q) {
+                const double apq = A[p][q];
+                if (std::abs(apq) < 1e-13) continue;
+                const double tau = (A[q][q] - A[p][p]) / (2.0 * apq);
+                const double t = (tau >= 0.0)
+                    ? (1.0 / (tau + std::sqrt(1.0 + tau * tau)))
+                    : (-1.0 / (-tau + std::sqrt(1.0 + tau * tau)));
+                const double c = 1.0 / std::sqrt(1.0 + t * t);
+                const double s = t * c;
+                A[p][p] -= t * apq;
+                A[q][q] += t * apq;
+                A[p][q] = A[q][p] = 0.0;
+                for (int r = 0; r < 20; ++r) {
+                    if (r != p && r != q) {
+                        const double arp = A[r][p];
+                        const double arq = A[r][q];
+                        A[r][p] = A[p][r] = c * arp - s * arq;
+                        A[r][q] = A[q][r] = s * arp + c * arq;
+                    }
+                    const double vrp = V[r][p];
+                    const double vrq = V[r][q];
+                    V[r][p] = c * vrp - s * vrq;
+                    V[r][q] = s * vrp + c * vrq;
+                }
             }
+        }
+    }
+    std::array<int, 20> eigOrd;
+    std::iota(eigOrd.begin(), eigOrd.end(), 0);
+    std::sort(eigOrd.begin(), eigOrd.end(), [&](int a, int b) { return A[a][a] > A[b][b]; });
+    float Q[20][20] = {};
+    for (int k = 0; k < 20; ++k) {
+        const int col = eigOrd[k];
+        const double scale = (A[col][col] > 1e-9) ? std::sqrt(A[col][col]) : 0.0;
+        for (int i = 0; i < 20; ++i) {
+            Q[i][k] = static_cast<float>(V[i][col] * scale);
         }
     }
 
@@ -834,6 +969,16 @@ void runProfileBMENNI(std::vector<BinaryTreeNode>& nodes, int maxRounds) {
         return q;
     };
 
+    auto distProfiles = [&](const float* pA, const float* pB) -> double {
+        float m = 0.0f;
+        for (int k = 0; k < dimP; ++k) m += pA[k] * pB[k];
+        float u = 0.0f;
+        const float* oA = pA + dimP;
+        const float* oB = pB + dimP;
+        for (int k = 0; k < seqLen; ++k) u += oA[k] * oB[k];
+        return toEvolDist(m, u);
+    };
+
     std::vector<int> order;
     order.reserve(M);
     std::vector<int> parent(M, -1);
@@ -921,171 +1066,557 @@ void runProfileBMENNI(std::vector<BinaryTreeNode>& nodes, int maxRounds) {
     std::vector<int> touched(M, -1);
     std::vector<PrecomputedQuartet> preQuartets(M);
     std::vector<float> scratchB(totalDim), scratchC(totalDim), scratchD(totalDim);
+    int globalRoundId = 0;
 
-    for (int round = 0; round < maxRounds; ++round) {
-        computeTopDown();
+    auto runNNIPass = [&](int numRounds) {
+        std::fill(active.begin(), active.end(), 1);
+        for (int rIdx = 0; rIdx < numRounds; ++rIdx) {
+            const int round = globalRoundId++;
+            computeTopDown();
 
-        // Parallel quartet evaluation across all active internal edges (u -> v).
-        tbb::parallel_for(tbb::blocked_range<int>(1, M), [&](const tbb::blocked_range<int>& r) {
-            std::vector<float> bBuf(totalDim), cBuf(totalDim), dBuf(totalDim);
-            for (int v = r.begin(); v < r.end(); ++v) {
-                if (!active[v]) {
-                    preQuartets[v].valid = false;
-                    continue;
+            tbb::parallel_for(tbb::blocked_range<int>(1, M), [&](const tbb::blocked_range<int>& r) {
+                std::vector<float> bBuf(totalDim), cBuf(totalDim), dBuf(totalDim);
+                for (int v = r.begin(); v < r.end(); ++v) {
+                    if (!active[v]) {
+                        preQuartets[v].valid = false;
+                        continue;
+                    }
+                    const int u = parent[v];
+                    if (u <= 0) {
+                        preQuartets[v].valid = false;
+                        continue;
+                    }
+                    const int iv = (nodes[u].child[0] == v) ? 0 : 1;
+                    const int B = nodes[u].child[1 - iv];
+                    const int C = nodes[v].child[0];
+                    const int D = nodes[v].child[1];
+                    const float* pA = &PO_out[static_cast<size_t>(u) * totalDim];
+                    const float* pB = getNodeProfile(B, bBuf);
+                    const float* pC = getNodeProfile(C, cBuf);
+                    const float* pD = getNodeProfile(D, dBuf);
+                    preQuartets[v] = evalQuartet(pA, pB, pC, pD);
                 }
-                const int u = parent[v];
-                if (u <= 0) {
-                    preQuartets[v].valid = false;
-                    continue;
-                }
-                const int iv = (nodes[u].child[0] == v) ? 0 : 1;
-                const int B = nodes[u].child[1 - iv];
-                const int C = nodes[v].child[0];
-                const int D = nodes[v].child[1];
-                const float* pA = &PO_out[static_cast<size_t>(u) * totalDim];
-                const float* pB = getNodeProfile(B, bBuf);
-                const float* pC = getNodeProfile(C, cBuf);
-                const float* pD = getNodeProfile(D, dBuf);
-                preQuartets[v] = evalQuartet(pA, pB, pC, pD);
-            }
-        });
+            });
 
-        std::fill(nextActive.begin(), nextActive.end(), 0);
-        int swaps = 0;
+            std::fill(nextActive.begin(), nextActive.end(), 0);
+            int swaps = 0;
 
-        auto markNeighborhoodActive = [&](int u, int v) {
-            auto markNode = [&](int x) {
-                if (x >= 0 && x < M) {
-                    nextActive[x] = 1;
-                    if (nodes[x].child[0] >= 0) nextActive[nodes[x].child[0]] = 1;
-                    if (nodes[x].child[1] >= 0) nextActive[nodes[x].child[1]] = 1;
-                }
+            auto markNeighborhoodActive = [&](int u, int v) {
+                auto markNode = [&](int x) {
+                    if (x >= 0 && x < M) {
+                        nextActive[x] = 1;
+                        if (nodes[x].child[0] >= 0) nextActive[nodes[x].child[0]] = 1;
+                        if (nodes[x].child[1] >= 0) nextActive[nodes[x].child[1]] = 1;
+                    }
+                };
+                markNode(u);
+                markNode(v);
+                if (parent[u] >= 0) markNode(parent[u]);
+                if (nodes[v].child[0] >= 0) markNode(nodes[v].child[0]);
+                if (nodes[v].child[1] >= 0) markNode(nodes[v].child[1]);
             };
-            markNode(u);
-            markNode(v);
-            if (parent[u] >= 0) markNode(parent[u]);
-            if (nodes[v].child[0] >= 0) markNode(nodes[v].child[0]);
-            if (nodes[v].child[1] >= 0) markNode(nodes[v].child[1]);
+
+            for (int idx = M - 1; idx >= 0; --idx) {
+                const int u = order[idx];
+                if (u == 0) continue;
+                for (int iv = 0; iv < 2; ++iv) {
+                    const int v = nodes[u].child[iv];
+                    if (v < 0) continue;
+                    const int B = nodes[u].child[1 - iv];
+                    const int C = nodes[v].child[0];
+                    const int D = nodes[v].child[1];
+
+                    const bool dirtyInRound =
+                        (touched[u] == round) || (touched[v] == round) ||
+                        (B >= 0 && touched[B] == round) ||
+                        (C >= 0 && touched[C] == round) ||
+                        (D >= 0 && touched[D] == round);
+
+                    if (!active[v] && !dirtyInRound) continue;
+
+                    PrecomputedQuartet q;
+                    if (!dirtyInRound && preQuartets[v].valid) {
+                        q = preQuartets[v];
+                    } else {
+                        const float* pA = &PO_out[static_cast<size_t>(u) * totalDim];
+                        const float* pB = getNodeProfile(B, scratchB);
+                        const float* pC = getNodeProfile(C, scratchC);
+                        const float* pD = getNodeProfile(D, scratchD);
+                        q = evalQuartet(pA, pB, pC, pD);
+                    }
+
+                    const double s0 = q.dAB + q.dCD;
+                    const double s1 = q.dAC + q.dBD;
+                    const double s2 = q.dAD + q.dBC;
+
+                    if (s1 < s0 - 1e-7 && s1 <= s2) {
+                        const double lenB = nodes[u].length[1 - iv];
+                        const double lenC = nodes[v].length[0];
+                        nodes[u].child[1 - iv] = C;
+                        nodes[u].length[1 - iv] = lenC;
+                        nodes[v].child[0] = B;
+                        nodes[v].length[0] = lenB;
+                        if (C >= 0) parent[C] = u;
+                        if (B >= 0) parent[B] = v;
+
+                        const double newLenUV = 0.25 * (q.dAB + q.dAD + q.dBC + q.dCD) - 0.5 * s1;
+                        nodes[u].length[iv] = std::max(1e-6, newLenUV);
+
+                        const float* pA = &PO_out[static_cast<size_t>(u) * totalDim];
+                        const float* pB = getNodeProfile(B, scratchB);
+                        const float* pC = getNodeProfile(C, scratchC);
+                        const float* pD = getNodeProfile(D, scratchD);
+
+                        float* poV = &PO[static_cast<size_t>(v) * totalDim];
+                        float* poU = &PO[static_cast<size_t>(u) * totalDim];
+                        float* poOutV = &PO_out[static_cast<size_t>(v) * totalDim];
+
+                        averageProfiles(poV, pB, pD);
+                        averageProfiles(poU, poV, pC);
+                        if (C >= 0) averageProfiles(&PO_out[static_cast<size_t>(C) * totalDim], pA, poV);
+                        averageProfiles(poOutV, pA, pC);
+                        if (B >= 0) averageProfiles(&PO_out[static_cast<size_t>(B) * totalDim], poOutV, pD);
+                        if (D >= 0) averageProfiles(&PO_out[static_cast<size_t>(D) * totalDim], poOutV, pB);
+
+                        touched[u] = round;
+                        touched[v] = round;
+                        if (B >= 0) touched[B] = round;
+                        if (C >= 0) touched[C] = round;
+                        if (D >= 0) touched[D] = round;
+                        markNeighborhoodActive(u, v);
+                        ++swaps;
+                    } else if (s2 < s0 - 1e-7 && s2 < s1) {
+                        const double lenB = nodes[u].length[1 - iv];
+                        const double lenD = nodes[v].length[1];
+                        nodes[u].child[1 - iv] = D;
+                        nodes[u].length[1 - iv] = lenD;
+                        nodes[v].child[1] = B;
+                        nodes[v].length[1] = lenB;
+                        if (D >= 0) parent[D] = u;
+                        if (B >= 0) parent[B] = v;
+
+                        const double newLenUV = 0.25 * (q.dAB + q.dAC + q.dBC + q.dCD) - 0.5 * s2;
+                        nodes[u].length[iv] = std::max(1e-6, newLenUV);
+
+                        const float* pA = &PO_out[static_cast<size_t>(u) * totalDim];
+                        const float* pB = getNodeProfile(B, scratchB);
+                        const float* pC = getNodeProfile(C, scratchC);
+                        const float* pD = getNodeProfile(D, scratchD);
+
+                        float* poV = &PO[static_cast<size_t>(v) * totalDim];
+                        float* poU = &PO[static_cast<size_t>(u) * totalDim];
+                        float* poOutV = &PO_out[static_cast<size_t>(v) * totalDim];
+
+                        averageProfiles(poV, pC, pB);
+                        averageProfiles(poU, poV, pD);
+                        if (D >= 0) averageProfiles(&PO_out[static_cast<size_t>(D) * totalDim], pA, poV);
+                        averageProfiles(poOutV, pA, pD);
+                        if (C >= 0) averageProfiles(&PO_out[static_cast<size_t>(C) * totalDim], poOutV, pB);
+                        if (B >= 0) averageProfiles(&PO_out[static_cast<size_t>(B) * totalDim], poOutV, pC);
+
+                        touched[u] = round;
+                        touched[v] = round;
+                        if (B >= 0) touched[B] = round;
+                        if (C >= 0) touched[C] = round;
+                        if (D >= 0) touched[D] = round;
+                        markNeighborhoodActive(u, v);
+                        ++swaps;
+                    } else if (nodes[u].length[iv] <= 0.0) {
+                        const double bmeLen = 0.25 * (q.dAC + q.dAD + q.dBC + q.dBD) - 0.5 * s0;
+                        nodes[u].length[iv] = std::max(1e-6, bmeLen);
+                    }
+                }
+            }
+
+            if (swaps == 0) break;
+            rebuildTraversal();
+            computeBottomUp();
+            active.swap(nextActive);
+        }
+    };
+
+    runNNIPass(maxRounds);
+
+    // 2. GPU Profile-Attention Teleportation (Non-Local Clade & Basal Leaf Regrafting)
+    if (M >= 10) {
+        std::array<int, 64> sampleCols;
+        for (int s = 0; s < 64; ++s) {
+            sampleCols[s] = std::min(seqLen - 1, (s * seqLen) / 64);
+        }
+
+        std::vector<int> tin(M, 0), tout(M, 0), subSize(M, 0);
+        auto buildEulerAndSizes = [&]() {
+            int timer = 0;
+            // Iterative Euler tour on internal nodes 0..M-1
+            std::vector<std::pair<int, int>> stk;
+            stk.reserve(M);
+            stk.push_back({0, 0});
+            while (!stk.empty()) {
+                const int u = stk.back().first;
+                const int state = stk.back().second;
+                if (state == 0) {
+                    tin[u] = timer++;
+                    stk.back().second = 1;
+                    const int c0 = nodes[u].child[0];
+                    if (c0 >= 0) stk.push_back({c0, 0});
+                } else if (state == 1) {
+                    stk.back().second = 2;
+                    const int c1 = nodes[u].child[1];
+                    if (c1 >= 0) stk.push_back({c1, 0});
+                } else {
+                    tout[u] = timer++;
+                    stk.pop_back();
+                }
+            }
+            for (int u : order) {
+                int s = 0;
+                for (int iv = 0; iv < 2; ++iv) {
+                    const int c = nodes[u].child[iv];
+                    s += (c < 0) ? 1 : subSize[c];
+                }
+                subSize[u] = s;
+            }
         };
 
-        // Sequential postorder walk (identical order to reversed(order) in prototype: top-down / reverse-postorder).
-        for (int idx = M - 1; idx >= 0; --idx) {
-            const int u = order[idx];
-            if (u == 0) continue;
+        auto isInternalAnc = [&](int a, int b) -> bool {
+            return tin[a] <= tin[b] && tout[b] <= tout[a];
+        };
+
+        float4* d_queries = nullptr;
+        float4* d_keys = nullptr;
+        int* d_topK = nullptr;
+        size_t allocQueries = 0;
+        size_t allocKeys = 0;
+
+        for (int sprRound = 0; sprRound < 3; ++sprRound) {
+            rebuildTraversal();
+            computeBottomUp();
+            computeTopDown();
+            buildEulerAndSizes();
+
+            struct EdgeItem {
+                int u;
+                int iv;
+                int nodeCode;
+                int sz;
+                double curAdd;
+            };
+
+            std::vector<EdgeItem> activeEdges;
+            activeEdges.reserve(2 * M - 2);
+            for (int u = 1; u < M; ++u) {
+                if (parent[u] < 0) continue;
+                for (int iv = 0; iv < 2; ++iv) {
+                    const int c = nodes[u].child[iv];
+                    const int sz = (c < 0) ? 1 : subSize[c];
+                    activeEdges.push_back({u, iv, c, sz, 0.0});
+                }
+            }
+            const int numActive = static_cast<int>(activeEdges.size());
+            if (numActive < 4) break;
+
+            // Compute current BME insertion length (curAdd) and 128-D unit-normalized attention embedding
+            std::vector<float> h_embeddings(static_cast<size_t>(numActive) * kAttnDim, 0.0f);
+            tbb::parallel_for(tbb::blocked_range<int>(0, numActive), [&](const tbb::blocked_range<int>& r) {
+                std::vector<float> pBuf(totalDim), wBuf(totalDim);
+                for (int idx = r.begin(); idx < r.end(); ++idx) {
+                    const int u = activeEdges[idx].u;
+                    const int iv = activeEdges[idx].iv;
+                    const int pCode = activeEdges[idx].nodeCode;
+                    const int wCode = nodes[u].child[1 - iv];
+
+                    const float* pP = getNodeProfile(pCode, pBuf);
+                    const float* pW = getNodeProfile(wCode, wBuf);
+                    const float* pOutU = &PO_out[static_cast<size_t>(u) * totalDim];
+
+                    const double dPW = distProfiles(pP, pW);
+                    const double dPOut = distProfiles(pP, pOutU);
+                    const double dWOut = distProfiles(pW, pOutU);
+                    activeEdges[idx].curAdd = 0.5 * (dPW + dPOut - dWOut);
+
+                    float* emb = &h_embeddings[static_cast<size_t>(idx) * kAttnDim];
+                    float normSq = 1e-12f;
+                    for (int s = 0; s < 64; ++s) {
+                        const int col = sampleCols[s];
+                        const float v0 = pP[col * 20 + 0];
+                        const float v1 = pP[col * 20 + 1];
+                        emb[s * 2 + 0] = v0;
+                        emb[s * 2 + 1] = v1;
+                        normSq += v0 * v0 + v1 * v1;
+                    }
+                    const float invNorm = 1.0f / std::sqrt(normSq);
+                    for (int f = 0; f < kAttnDim; ++f) emb[f] *= invNorm;
+                }
+            });
+
+            // Select queries (all candidate sub-clades with sz <= M/4, up to 32768 prioritized by curAdd)
+            std::vector<int> queryMap;
+            queryMap.reserve(std::min(numActive, 32768));
+            for (int idx = 0; idx < numActive; ++idx) {
+                if (activeEdges[idx].sz <= M / 4 && parent[activeEdges[idx].u] != 0) {
+                    queryMap.push_back(idx);
+                }
+            }
+            if (queryMap.size() > 32768) {
+                std::nth_element(queryMap.begin(), queryMap.begin() + 32768, queryMap.end(),
+                    [&](int a, int b) {
+                        const bool subA = (activeEdges[a].sz >= 2);
+                        const bool subB = (activeEdges[b].sz >= 2);
+                        if (subA != subB) return subA > subB;
+                        return activeEdges[a].curAdd > activeEdges[b].curAdd;
+                    });
+                queryMap.resize(32768);
+            }
+            const int numQueries = static_cast<int>(queryMap.size());
+            if (numQueries == 0) break;
+
+            // Select keys (up to 65536 active edges across the tree)
+            std::vector<int> keyMap;
+            if (numActive <= 65536) {
+                keyMap.resize(numActive);
+                std::iota(keyMap.begin(), keyMap.end(), 0);
+            } else {
+                keyMap.reserve(65536);
+                const double step = static_cast<double>(numActive) / 65536.0;
+                for (int k = 0; k < 65536; ++k) {
+                    keyMap.push_back(std::min(numActive - 1, static_cast<int>(k * step)));
+                }
+            }
+            const int numKeys = static_cast<int>(keyMap.size());
+
+            std::vector<float> h_queries(static_cast<size_t>(numQueries) * kAttnDim);
+            for (int q = 0; q < numQueries; ++q) {
+                std::memcpy(&h_queries[static_cast<size_t>(q) * kAttnDim],
+                            &h_embeddings[static_cast<size_t>(queryMap[q]) * kAttnDim],
+                            kAttnDim * sizeof(float));
+            }
+            const float* h_keysPtr = (numKeys == numActive) ? h_embeddings.data() : nullptr;
+            std::vector<float> h_keysBuf;
+            if (!h_keysPtr) {
+                h_keysBuf.resize(static_cast<size_t>(numKeys) * kAttnDim);
+                for (int k = 0; k < numKeys; ++k) {
+                    std::memcpy(&h_keysBuf[static_cast<size_t>(k) * kAttnDim],
+                                &h_embeddings[static_cast<size_t>(keyMap[k]) * kAttnDim],
+                                kAttnDim * sizeof(float));
+                }
+                h_keysPtr = h_keysBuf.data();
+            }
+
+            if (static_cast<size_t>(numQueries) > allocQueries) {
+                if (d_queries) cudaFree(d_queries);
+                if (d_topK) cudaFree(d_topK);
+                allocQueries = static_cast<size_t>(numQueries);
+                cudaMalloc(&d_queries, allocQueries * kAttnDim * sizeof(float));
+                cudaMalloc(&d_topK, allocQueries * kAttnTopK * sizeof(int));
+            }
+            if (static_cast<size_t>(numKeys) > allocKeys) {
+                if (d_keys) cudaFree(d_keys);
+                allocKeys = static_cast<size_t>(numKeys);
+                cudaMalloc(&d_keys, allocKeys * kAttnDim * sizeof(float));
+            }
+
+            cudaMemcpy(d_queries, h_queries.data(), static_cast<size_t>(numQueries) * kAttnDim * sizeof(float), cudaMemcpyHostToDevice);
+            cudaMemcpy(d_keys, h_keysPtr, static_cast<size_t>(numKeys) * kAttnDim * sizeof(float), cudaMemcpyHostToDevice);
+
+            const int blockSize = 128;
+            const int gridSize = (numQueries + blockSize - 1) / blockSize;
+            profileAttentionTopKKernel<<<gridSize, blockSize>>>(numQueries, numKeys, d_queries, d_keys, d_topK);
+
+            std::vector<int> h_topK(static_cast<size_t>(numQueries) * kAttnTopK, -1);
+            cudaMemcpy(h_topK.data(), d_topK, static_cast<size_t>(numQueries) * kAttnTopK * sizeof(int), cudaMemcpyDeviceToHost);
+
+            // Evaluate exact O(1) BME insertion cost + 4-point condition in parallel across queries
+            std::vector<TeleportMove> bestPerQuery(numQueries);
+            tbb::parallel_for(tbb::blocked_range<int>(0, numQueries), [&](const tbb::blocked_range<int>& r) {
+                std::vector<float> pBuf(totalDim), cBuf(totalDim), sBuf(totalDim), outCBuf(totalDim);
+                for (int q = r.begin(); q < r.end(); ++q) {
+                    const int aIdx = queryMap[q];
+                    const int u = activeEdges[aIdx].u;
+                    const int iv = activeEdges[aIdx].iv;
+                    const int pCode = activeEdges[aIdx].nodeCode;
+                    const int gu = parent[u];
+                    if (gu <= 0) continue;
+
+                    const double curAdd = activeEdges[aIdx].curAdd;
+                    const float* pP = getNodeProfile(pCode, pBuf);
+                    TeleportMove bestMove;
+
+                    const int* topKRow = &h_topK[static_cast<size_t>(q) * kAttnTopK];
+                    for (int k = 0; k < kAttnTopK; ++k) {
+                        const int kIdx = topKRow[k];
+                        if (kIdx < 0 || kIdx >= numKeys) continue;
+                        const int targetEdgeIdx = keyMap[kIdx];
+                        if (targetEdgeIdx == aIdx) continue;
+
+                        const int x = activeEdges[targetEdgeIdx].u;
+                        const int ic = activeEdges[targetEdgeIdx].iv;
+                        const int cCode = activeEdges[targetEdgeIdx].nodeCode;
+                        if (x <= 0 || x == u || x == gu) continue;
+                        if (isInternalAnc(u, x)) continue;
+                        if (cCode >= 0 && isInternalAnc(cCode, u)) continue;
+
+                        const int sCode = nodes[x].child[1 - ic];
+                        const float* pC = getNodeProfile(cCode, cBuf);
+                        const float* pS = getNodeProfile(sCode, sBuf);
+                        const float* pOutX = &PO_out[static_cast<size_t>(x) * totalDim];
+
+                        const float* pOutC = nullptr;
+                        if (cCode >= 0) {
+                            pOutC = &PO_out[static_cast<size_t>(cCode) * totalDim];
+                        } else {
+                            averageProfiles(outCBuf.data(), pOutX, pS);
+                            pOutC = outCBuf.data();
+                        }
+
+                        const double dPC = distProfiles(pP, pC);
+                        const double dPOutC = distProfiles(pP, pOutC);
+                        const double dCOutC = distProfiles(pC, pOutC);
+                        const double newAdd = 0.5 * (dPC + dPOutC - dCOutC);
+                        const double gain = newAdd - curAdd;
+                        if (gain >= -0.015 || gain >= bestMove.gain) continue;
+
+                        const double dOutXS = distProfiles(pOutX, pS);
+                        const double dOutXP = distProfiles(pOutX, pP);
+                        const double dSC = distProfiles(pS, pC);
+                        const double dOutXC = distProfiles(pOutX, pC);
+                        const double dSP = distProfiles(pS, pP);
+
+                        const double q0 = dOutXS + dPC;
+                        const double q1 = dOutXP + dSC;
+                        const double q2 = dOutXC + dSP;
+                        if (q0 < std::min(q1, q2) - 0.01) {
+                            bestMove.gain = gain;
+                            bestMove.u = u;
+                            bestMove.iv = iv;
+                            bestMove.x = x;
+                            bestMove.ic = ic;
+                            bestMove.newLenUX = std::max(1e-5, 0.25 * (q1 + q2) - 0.5 * q0);
+                            bestMove.newLenUP = std::max(1e-5, newAdd);
+                            bestMove.newLenUC = std::max(1e-5, 0.5 * (dPC + dCOutC - dPOutC));
+                        }
+                    }
+                    bestPerQuery[q] = bestMove;
+                }
+            });
+
+            std::vector<TeleportMove> candidates;
+            for (const auto& m : bestPerQuery) {
+                if (m.u > 0 && m.gain < -0.015) candidates.push_back(m);
+            }
+            if (candidates.empty()) break;
+
+            std::sort(candidates.begin(), candidates.end(),
+                      [](const TeleportMove& a, const TeleportMove& b) { return a.gain < b.gain; });
+
+            std::vector<uint8_t> busy(M, 0);
+            int applied = 0;
+            for (const auto& m : candidates) {
+                const int u = m.u;
+                const int iv = m.iv;
+                const int x = m.x;
+                const int ic = m.ic;
+                const int gu = parent[u];
+                if (gu <= 0 || x <= 0 || gu == x || u == x) continue;
+                const int pCode = nodes[u].child[iv];
+                const int wCode = nodes[u].child[1 - iv];
+                const int cCode = nodes[x].child[ic];
+
+                if (busy[u] || busy[gu] || busy[x]) continue;
+                if (pCode >= 0 && busy[pCode]) continue;
+                if (wCode >= 0 && busy[wCode]) continue;
+                if (cCode >= 0 && busy[cCode]) continue;
+
+                // Ensure strict subtree disjointness using live parent[] pointers
+                if (isInternalAnc(u, x) || (cCode >= 0 && isInternalAnc(cCode, u))) continue;
+                bool cycleRisk = false;
+                for (int cur = x; cur != -1; cur = parent[cur]) {
+                    if (cur == u || (pCode >= 0 && cur == pCode)) {
+                        cycleRisk = true;
+                        break;
+                    }
+                }
+                if (!cycleRisk && cCode >= 0) {
+                    for (int cur = u; cur != -1; cur = parent[cur]) {
+                        if (cur == cCode) {
+                            cycleRisk = true;
+                            break;
+                        }
+                    }
+                }
+                if (cycleRisk) continue;
+
+                const int igu = (nodes[gu].child[0] == u) ? 0 : 1;
+                const double wLen = nodes[u].length[1 - iv] + nodes[gu].length[igu];
+
+                // 1. Bypass u at gu -> wCode
+                nodes[gu].child[igu] = wCode;
+                nodes[gu].length[igu] = wLen;
+                if (wCode >= 0) parent[wCode] = gu;
+
+                // 2. Insert u on edge (x -> cCode)
+                nodes[x].child[ic] = u;
+                nodes[x].length[ic] = m.newLenUX;
+                parent[u] = x;
+
+                nodes[u].child[iv] = pCode;
+                nodes[u].length[iv] = m.newLenUP;
+                if (pCode >= 0) parent[pCode] = u;
+
+                nodes[u].child[1 - iv] = cCode;
+                nodes[u].length[1 - iv] = m.newLenUC;
+                if (cCode >= 0) parent[cCode] = u;
+
+                busy[u] = busy[gu] = busy[x] = 1;
+                if (pCode >= 0) busy[pCode] = 1;
+                if (wCode >= 0) busy[wCode] = 1;
+                if (cCode >= 0) busy[cCode] = 1;
+                ++applied;
+            }
+
+            if (applied == 0) break;
+            rebuildTraversal();
+            computeBottomUp();
+            runNNIPass(6);
+        }
+
+        if (d_queries) cudaFree(d_queries);
+        if (d_keys) cudaFree(d_keys);
+        if (d_topK) cudaFree(d_topK);
+    }
+
+    // 3. Final exact 4-point internal / 3-point leaf branch length update
+    rebuildTraversal();
+    computeBottomUp();
+    computeTopDown();
+
+    tbb::parallel_for(tbb::blocked_range<int>(1, M), [&](const tbb::blocked_range<int>& r) {
+        std::vector<float> bBuf(totalDim), cBuf(totalDim), dBuf(totalDim);
+        for (int u = r.begin(); u < r.end(); ++u) {
+            if (parent[u] < 0) continue;
+            const float* pA = &PO_out[static_cast<size_t>(u) * totalDim];
             for (int iv = 0; iv < 2; ++iv) {
                 const int v = nodes[u].child[iv];
-                if (v < 0) continue;
                 const int B = nodes[u].child[1 - iv];
-                const int C = nodes[v].child[0];
-                const int D = nodes[v].child[1];
-
-                const bool dirtyInRound =
-                    (touched[u] == round) || (touched[v] == round) ||
-                    (B >= 0 && touched[B] == round) ||
-                    (C >= 0 && touched[C] == round) ||
-                    (D >= 0 && touched[D] == round);
-
-                if (!active[v] && !dirtyInRound) continue;
-
-                PrecomputedQuartet q;
-                if (!dirtyInRound && preQuartets[v].valid) {
-                    q = preQuartets[v];
+                const float* pB = getNodeProfile(B, bBuf);
+                if (v < 0) {
+                    const float* pV = getNodeProfile(v, cBuf);
+                    const double dVB = distProfiles(pV, pB);
+                    const double dVA = distProfiles(pV, pA);
+                    const double dBA = distProfiles(pB, pA);
+                    nodes[u].length[iv] = std::max(1e-5, 0.5 * (dVB + dVA - dBA));
                 } else {
-                    const float* pA = &PO_out[static_cast<size_t>(u) * totalDim];
-                    const float* pB = getNodeProfile(B, scratchB);
-                    const float* pC = getNodeProfile(C, scratchC);
-                    const float* pD = getNodeProfile(D, scratchD);
-                    q = evalQuartet(pA, pB, pC, pD);
-                }
-
-                const double s0 = q.dAB + q.dCD;
-                const double s1 = q.dAC + q.dBD;
-                const double s2 = q.dAD + q.dBC;
-
-                if (s1 < s0 - 1e-7 && s1 <= s2) {
-                    const double lenB = nodes[u].length[1 - iv];
-                    const double lenC = nodes[v].length[0];
-                    nodes[u].child[1 - iv] = C;
-                    nodes[u].length[1 - iv] = lenC;
-                    nodes[v].child[0] = B;
-                    nodes[v].length[0] = lenB;
-                    if (C >= 0) parent[C] = u;
-                    if (B >= 0) parent[B] = v;
-
-                    const double newLenUV = 0.25 * (q.dAB + q.dAD + q.dBC + q.dCD) - 0.5 * s1;
-                    nodes[u].length[iv] = std::max(1e-6, newLenUV);
-
-                    const float* pA = &PO_out[static_cast<size_t>(u) * totalDim];
-                    const float* pB = getNodeProfile(B, scratchB);
-                    const float* pC = getNodeProfile(C, scratchC);
-                    const float* pD = getNodeProfile(D, scratchD);
-
-                    float* poV = &PO[static_cast<size_t>(v) * totalDim];
-                    float* poU = &PO[static_cast<size_t>(u) * totalDim];
-                    float* poOutV = &PO_out[static_cast<size_t>(v) * totalDim];
-
-                    averageProfiles(poV, pB, pD);
-                    averageProfiles(poU, poV, pC);
-                    if (C >= 0) averageProfiles(&PO_out[static_cast<size_t>(C) * totalDim], pA, poV);
-                    averageProfiles(poOutV, pA, pC);
-                    if (B >= 0) averageProfiles(&PO_out[static_cast<size_t>(B) * totalDim], poOutV, pD);
-                    if (D >= 0) averageProfiles(&PO_out[static_cast<size_t>(D) * totalDim], poOutV, pB);
-
-                    touched[u] = round;
-                    touched[v] = round;
-                    if (B >= 0) touched[B] = round;
-                    if (C >= 0) touched[C] = round;
-                    if (D >= 0) touched[D] = round;
-                    markNeighborhoodActive(u, v);
-                    ++swaps;
-                } else if (s2 < s0 - 1e-7 && s2 < s1) {
-                    const double lenB = nodes[u].length[1 - iv];
-                    const double lenD = nodes[v].length[1];
-                    nodes[u].child[1 - iv] = D;
-                    nodes[u].length[1 - iv] = lenD;
-                    nodes[v].child[1] = B;
-                    nodes[v].length[1] = lenB;
-                    if (D >= 0) parent[D] = u;
-                    if (B >= 0) parent[B] = v;
-
-                    const double newLenUV = 0.25 * (q.dAB + q.dAC + q.dBC + q.dCD) - 0.5 * s2;
-                    nodes[u].length[iv] = std::max(1e-6, newLenUV);
-
-                    const float* pA = &PO_out[static_cast<size_t>(u) * totalDim];
-                    const float* pB = getNodeProfile(B, scratchB);
-                    const float* pC = getNodeProfile(C, scratchC);
-                    const float* pD = getNodeProfile(D, scratchD);
-
-                    float* poV = &PO[static_cast<size_t>(v) * totalDim];
-                    float* poU = &PO[static_cast<size_t>(u) * totalDim];
-                    float* poOutV = &PO_out[static_cast<size_t>(v) * totalDim];
-
-                    averageProfiles(poV, pC, pB);
-                    averageProfiles(poU, poV, pD);
-                    if (D >= 0) averageProfiles(&PO_out[static_cast<size_t>(D) * totalDim], pA, poV);
-                    averageProfiles(poOutV, pA, pD);
-                    if (C >= 0) averageProfiles(&PO_out[static_cast<size_t>(C) * totalDim], poOutV, pB);
-                    if (B >= 0) averageProfiles(&PO_out[static_cast<size_t>(B) * totalDim], poOutV, pC);
-
-                    touched[u] = round;
-                    touched[v] = round;
-                    if (B >= 0) touched[B] = round;
-                    if (C >= 0) touched[C] = round;
-                    if (D >= 0) touched[D] = round;
-                    markNeighborhoodActive(u, v);
-                    ++swaps;
-                } else if (nodes[u].length[iv] <= 0.0) {
+                    const int C = nodes[v].child[0];
+                    const int D = nodes[v].child[1];
+                    const float* pC = getNodeProfile(C, cBuf);
+                    const float* pD = getNodeProfile(D, dBuf);
+                    const PrecomputedQuartet q = evalQuartet(pA, pB, pC, pD);
+                    const double s0 = q.dAB + q.dCD;
                     const double bmeLen = 0.25 * (q.dAC + q.dAD + q.dBC + q.dBD) - 0.5 * s0;
-                    nodes[u].length[iv] = std::max(1e-6, bmeLen);
+                    nodes[u].length[iv] = std::max(1e-5, bmeLen);
                 }
             }
         }
-
-        if (swaps == 0) break;
-        rebuildTraversal();
-        computeBottomUp();
-        active.swap(nextActive);
-    }
+    });
 }
 
 } // namespace
