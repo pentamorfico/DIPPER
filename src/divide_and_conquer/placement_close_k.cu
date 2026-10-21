@@ -259,7 +259,7 @@ __global__ void updateClosestNodesDC(
     double * dis
 ){
     int l=0,r=-1;
-    id[++r]=x,dis[x]=0,from[x]=-1;
+    id[++r]=x,dis[r]=0,from[r]=-1;
     while(l<=r){
         int node=id[l],fb=from[l];
         double d=dis[l];
@@ -298,7 +298,7 @@ __global__ void updateClosestNodesClusterDC(
     int * d_edgeMaskIndex
 ){
     int l=0,r=-1;
-    id[++r]=x,dis[x]=0,from[x]=-1;
+    id[++r]=x,dis[r]=0,from[r]=-1;
     while(l<=r){
         int node=id[l],fb=from[l];
         double d=dis[l];
@@ -339,13 +339,11 @@ __global__ void updateClosestNodesInClusterDC(
     int * d_edgeMaskIndex
 ){
     int l=0,r=-1;
-    id[++r]=x,dis[x]=0,from[x]=-1;
-    int ed1=e[cluster_eid], ed2=belong[cluster_eid];
+    id[++r]=x,dis[r]=0,from[r]=-1;
     while(l<=r){
         int node=id[l],fb=from[l];
         double d=dis[l];
         l++;
-        if(node==ed1||node==ed2) continue;
         
         for(int i=head[node];i!=-1;i=nxt[i]){
             // printf("node: %d, head[node]: %d, belong[node]: %d i : %d \n", node, head[node], belong[node], i);
@@ -702,6 +700,8 @@ void MashPlacement::KPlacementDeviceArraysDC::printTreeDC(std::vector <std::stri
         exit(1);
     }
 
+    refineAdjacencyTreeWithProfileNNI(totalNumSequences + bd - 2, totalNumSequences, h_head, h_e, h_nxt, nullptr, h_len);
+
     
     auto printName = [&](int node) {
         const std::string& raw = name[node];
@@ -794,6 +794,13 @@ void MashPlacement::KPlacementDeviceArraysDC::printTreeDC(std::vector <std::stri
         print_binary(totalNumSequences + bd - 2, -1);
     }
     output_ << ";";
+
+    delete[] h_head;
+    delete[] h_e;
+    delete[] h_nxt;
+    delete[] h_len;
+    delete[] h_closest_dis;
+    delete[] h_closest_id;
 }
 
 __global__
@@ -866,56 +873,82 @@ void MashPlacement::KPlacementDeviceArraysDC::findBackboneTreeDC(
     /*
     Build Initial Tree
     */
-    if(params.in == "r"){
-        mashDeviceArrays.distConstructionOnGpuForBackboneDC(
-            params,
-            1,
-            d_dist
-        );
-    }
-    else if(params.in == "d"){
-        matrixReader.distConstructionOnGpu(
-            params,
-            1,
-            d_dist
-        );
-    }
-    else if(params.in == "m"){
-        msaDeviceArrays.distConstructionOnGpuForBackboneDC(
-            params,
-            1,
-            d_dist
-        );
-    }
-    
-    buildInitialTreeDC <<<1,1>>> (
-        totalNumSequences,
-        d_head,
-        d_e,
-        d_len,
-        d_nxt,
-        d_belong,
-        d_dist,
-        idx
-    );
-    idx += 4;
-
-    /*
-    Initialize closest nodes by inital tree
-    */
-    for(int i=0;i<bd;i++){
-        updateClosestNodesDC <<<1,1>>> (
+    int startBackboneIdx = bd;
+    if (numSequences >= 4) {
+        int seedSize = std::min(numSequences, 4000);
+        auto computeRow = [&](int rowIdx, double* d_rowOut) {
+            if (params.in == "r")
+                mashDeviceArrays.distConstructionOnGpuForBackboneDC(params, rowIdx, d_rowOut);
+            else if (params.in == "d")
+                matrixReader.distConstructionOnGpu(params, rowIdx, d_rowOut);
+            else if (params.in == "m")
+                msaDeviceArrays.distConstructionOnGpuForBackboneDC(params, rowIdx, d_rowOut);
+        };
+        buildNJSeedTreeOnGpu(
+            seedSize,
+            totalNumSequences,
+            computeRow,
             d_head,
-            d_nxt,
             d_e,
+            d_nxt,
+            d_belong,
             d_len,
             d_closest_dis,
             d_closest_id,
-            i,
-            d_id,
-            d_from,
-            d_dis
+            idx);
+        startBackboneIdx = seedSize;
+    } else {
+        if(params.in == "r"){
+            mashDeviceArrays.distConstructionOnGpuForBackboneDC(
+                params,
+                1,
+                d_dist
+            );
+        }
+        else if(params.in == "d"){
+            matrixReader.distConstructionOnGpu(
+                params,
+                1,
+                d_dist
+            );
+        }
+        else if(params.in == "m"){
+            msaDeviceArrays.distConstructionOnGpuForBackboneDC(
+                params,
+                1,
+                d_dist
+            );
+        }
+        
+        buildInitialTreeDC <<<1,1>>> (
+            totalNumSequences,
+            d_head,
+            d_e,
+            d_len,
+            d_nxt,
+            d_belong,
+            d_dist,
+            idx
         );
+        idx += 4;
+
+        /*
+        Initialize closest nodes by inital tree
+        */
+        for(int i=0;i<bd;i++){
+            updateClosestNodesDC <<<1,1>>> (
+                d_head,
+                d_nxt,
+                d_e,
+                d_len,
+                d_closest_dis,
+                d_closest_id,
+                i,
+                d_id,
+                d_from,
+                d_dis
+            );
+        }
     }
  
     std::cerr << "Finished initial tree construction" << std::endl;
@@ -924,7 +957,7 @@ void MashPlacement::KPlacementDeviceArraysDC::findBackboneTreeDC(
 
 
     std::chrono::nanoseconds disTime(0), treeTime(0);
-    for(int i=bd;i<numSequences;i++){
+    for(int i=startBackboneIdx;i<numSequences;i++){
         auto disStart = std::chrono::high_resolution_clock::now();
         if(params.in == "r"){
             mashDeviceArrays.distRangeConstructionOnGpuDC(
@@ -1552,7 +1585,7 @@ void MashPlacement::KPlacementDeviceArraysDC::findClusterTreeDC(
     }
 
     int * d_leafMap;
-    err = cudaMalloc(&d_leafMap, params.backboneSize*sizeof(int));
+    err = cudaMalloc(&d_leafMap, totalNumSequences*2*sizeof(int));
     if (err != cudaSuccess)
     {
         fprintf(stderr, "Gpu_ERROR: cudaMalloc failed!\n");
@@ -1829,7 +1862,7 @@ void MashPlacement::KPlacementDeviceArraysDC::findClusterTreeDC_batch(
     }
 
     int * d_leafMap;
-    err = cudaMalloc(&d_leafMap, params.backboneSize*sizeof(int));
+    err = cudaMalloc(&d_leafMap, totalNumSequences*2*sizeof(int));
     if (err != cudaSuccess)
     {
         fprintf(stderr, "Gpu_ERROR: cudaMalloc failed!\n");
@@ -2119,7 +2152,7 @@ void MashPlacement::KPlacementDeviceArraysDC::findBackboneTreeDCRecursive(
     }
 
     int * d_leafMap;
-    err = cudaMalloc(&d_leafMap, params.backboneSize*sizeof(int));
+    err = cudaMalloc(&d_leafMap, totalNumSequences*2*sizeof(int));
     if (err != cudaSuccess)
     {
         fprintf(stderr, "Gpu_ERROR: cudaMalloc failed!\n");

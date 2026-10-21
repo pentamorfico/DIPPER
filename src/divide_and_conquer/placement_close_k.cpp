@@ -204,7 +204,7 @@ void updateClosestNodesCpu(
     int * h_edgeMaskIndex
 ){
     int l=0,r=-1;
-    id[++r]=x,dis[x]=0,from[x]=-1;
+    id[++r]=x,dis[r]=0,from[r]=-1;
     while(l<=r){
         int node=id[l],fb=from[l];
         double d=dis[l];
@@ -248,7 +248,7 @@ void updateClosestNodesInClusterCpu(
     int * belong
 ){
     int l=0,r=-1;
-    id[++r]=x,dis[x]=0,from[x]=-1;
+    id[++r]=x,dis[r]=0,from[r]=-1;
     int ed1=e[cluster_eid], ed2=belong[cluster_eid];
     while(l<=r){
         int node=id[l],fb=from[l];

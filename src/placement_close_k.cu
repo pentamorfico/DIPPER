@@ -101,7 +101,7 @@ __global__ void updateClosestNodes(
     double *dis)
 {
     int l = 0, r = -1;
-    id[++r] = x, dis[x] = 0, from[x] = -1;
+    id[++r] = x, dis[r] = 0, from[r] = -1;
     while (l <= r)
     {
         int node = id[l], fb = from[l];
@@ -675,6 +675,8 @@ void MashPlacement::KPlacementDeviceArrays::printTree(std::vector <std::string> 
     checkCopy(cudaMemcpy(h_nxt,  d_nxt,  numSequences*8*sizeof(int),    cudaMemcpyDeviceToHost));
     checkCopy(cudaMemcpy(h_len,  d_len,  numSequences*8*sizeof(double), cudaMemcpyDeviceToHost));
 
+    refineAdjacencyTreeWithProfileNNI(numSequences + bd - 2, numSequences, h_head, h_e, h_nxt, nullptr, h_len);
+
     std::function<void(int,int)> print = [&](int node, int from) {
         // Build pos first, before deciding if this is a leaf or internal node
         std::vector<std::pair<int,int>> pos; // {edge_index, parent_node}
@@ -833,66 +835,89 @@ void MashPlacement::KPlacementDeviceArrays::findPlacementTree(
     /*
     Build Initial Tree
     */
-    if (params.in == "r")
+    int startPlacementIdx = bd;
+    if (numSequences >= 4)
     {
-        mashDeviceArrays.distConstructionOnGpu(
-            params,
-            1,
-            d_dist);
-    }
-    else if (params.in == "d")
-    {
-        matrixReader.distConstructionOnGpu(
-            params,
-            1,
-            d_dist);
-    }
-    else if (params.in == "m")
-    {
-        msaDeviceArrays.distConstructionOnGpu(
-            params,
-            1,
-            d_dist);
-    }
-    // cudaDeviceSynchronize();
-
-    // return;
-    // double * h_dis = new double[numSequences];
-    // cudaMemcpy(h_dis,d_dist,numSequences*sizeof(double),cudaMemcpyDeviceToHost);
-    // for(int j=0;j<1;j++) fprintf(stderr,"%.8lf ",h_dis[j]);std::cerr<<'\n';
-
-    buildInitialTree <<<1,1>>> (
-        numSequences,
-        d_head,
-        d_e,
-        d_len,
-        d_nxt,
-        d_belong,
-        d_dist,
-        idx);
-    idx += 4;
-    /*
-    Initialize closest nodes by inital tree
-    */
-    for (int i = 0; i < bd; i++)
-    {
-        updateClosestNodes<<<1, 1>>>(
+        int seedSize = std::min(numSequences, 3000);
+        auto computeRow = [&](int rowIdx, double* d_rowOut) {
+            if (params.in == "r")
+                mashDeviceArrays.distConstructionOnGpu(params, rowIdx, d_rowOut);
+            else if (params.in == "d")
+                matrixReader.distConstructionOnGpu(params, rowIdx, d_rowOut);
+            else if (params.in == "m")
+                msaDeviceArrays.distConstructionOnGpu(params, rowIdx, d_rowOut);
+        };
+        buildNJSeedTreeOnGpu(
+            seedSize,
+            numSequences,
+            computeRow,
             d_head,
-            d_nxt,
             d_e,
+            d_nxt,
+            d_belong,
             d_len,
             d_closest_dis,
             d_closest_id,
-            i,
-            d_id,
-            d_from,
-            d_dis);
+            idx);
+        startPlacementIdx = seedSize;
+    }
+    else
+    {
+        if (params.in == "r")
+        {
+            mashDeviceArrays.distConstructionOnGpu(
+                params,
+                1,
+                d_dist);
+        }
+        else if (params.in == "d")
+        {
+            matrixReader.distConstructionOnGpu(
+                params,
+                1,
+                d_dist);
+        }
+        else if (params.in == "m")
+        {
+            msaDeviceArrays.distConstructionOnGpu(
+                params,
+                1,
+                d_dist);
+        }
+
+        buildInitialTree <<<1,1>>> (
+            numSequences,
+            d_head,
+            d_e,
+            d_len,
+            d_nxt,
+            d_belong,
+            d_dist,
+            idx);
+        idx += 4;
+        /*
+        Initialize closest nodes by inital tree
+        */
+        for (int i = 0; i < bd; i++)
+        {
+            updateClosestNodes<<<1, 1>>>(
+                d_head,
+                d_nxt,
+                d_e,
+                d_len,
+                d_closest_dis,
+                d_closest_id,
+                i,
+                d_id,
+                d_from,
+                d_dis);
+        }
     }
 
     thrust::device_vector<thrust::tuple<int, double, double>> minPos(numSequences * 4 - 4);
     // std::cout<<"FFF\n";
     std::chrono::nanoseconds disTime(0), treeTime(0);
-    for (int i = bd; i < numSequences; i++)
+    for (int i = startPlacementIdx; i < numSequences; i++)
     {
         auto disStart = std::chrono::high_resolution_clock::now();
         // blockNum = (i + 255) / 256;

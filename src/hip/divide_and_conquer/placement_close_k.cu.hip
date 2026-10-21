@@ -249,7 +249,7 @@ __global__ void updateClosestNodesDC(
     double * dis
 ){
     int l=0,r=-1;
-    id[++r]=x,dis[x]=0,from[x]=-1;
+    id[++r]=x,dis[r]=0,from[r]=-1;
     while(l<=r){
         int node=id[l],fb=from[l];
         double d=dis[l];
@@ -287,7 +287,7 @@ __global__ void updateClosestNodesClusterDC(
     int * d_edgeMaskIndex
 ){
     int l=0,r=-1;
-    id[++r]=x,dis[x]=0,from[x]=-1;
+    id[++r]=x,dis[r]=0,from[r]=-1;
     while(l<=r){
         int node=id[l],fb=from[l];
         double d=dis[l];
@@ -327,13 +327,11 @@ __global__ void updateClosestNodesInClusterDC(
     int * d_edgeMaskIndex
 ){
     int l=0,r=-1;
-    id[++r]=x,dis[x]=0,from[x]=-1;
-    int ed1=e[cluster_eid], ed2=belong[cluster_eid];
+    id[++r]=x,dis[r]=0,from[r]=-1;
     while(l<=r){
         int node=id[l],fb=from[l];
         double d=dis[l];
         l++;
-        if(node==ed1||node==ed2) continue;
         
         for(int i=head[node];i!=-1;i=nxt[i]){
             // printf("node: %d, head[node]: %d, belong[node]: %d i : %d \n", node, head[node], belong[node], i);

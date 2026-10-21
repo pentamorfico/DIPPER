@@ -119,16 +119,16 @@ void parseArguments(int argc, char** argv)
         "Protein similarity model: blosum62 (default) or binary")
 
         ("entropy-gamma", po::value<std::string>(),
-        "Protein entropy weighting gamma (default: 2.0)")
+        "Protein entropy weighting gamma (default: 0.25)")
 
         ("gamma-alpha", po::value<std::string>(),
-        "Protein Gamma shape alpha (default: 0.8)")
+        "Protein Gamma shape alpha (default: 3.0)")
 
         ("protein-saturation", po::value<std::string>(),
-        "Protein saturation asymptote (default: 0.92)")
+        "Protein saturation asymptote (default: 1.15)")
 
         ("overlap-prior", po::value<std::string>(),
-        "Protein low-overlap prior weight (default: 3.0)")
+        "Protein low-overlap prior weight (default: 0.2)")
 
         ("input-tree,t",       po::value<std::string>(),
         "Input backbone tree (Newick format), required with --add option")
@@ -904,17 +904,20 @@ int main(int argc, char** argv) {
             /* Divide-and-conquer: backbone tree, cluster non-backbone, then place per cluster. */
             std::cerr<<"Using divide-and-conquer mode\n";
             int totalNumSequences = numSequences;
-	        int backboneSize = numSequences/100;
+            int defaultBackboneSize = (totalNumSequences < 30000)
+                ? std::max(2, totalNumSequences / 2)
+                : std::min(totalNumSequences, std::max(3000, totalNumSequences / 100));
+            int backboneSize = defaultBackboneSize;
             
             if (clusterSize != 0) {
                 if (clusterSize < numSequences/1000) {
-                    std::cerr << "Warning: cluster size set to too small, setting to default " << numSequences/100 << std::endl;
+                    std::cerr << "Warning: cluster size set to too small, setting to default " << defaultBackboneSize << std::endl;
                 } else {
                     backboneSize = clusterSize;
                     std::cerr << "Cluster size set to " << backboneSize << std::endl;
                 }
             } else {
-                std::cerr << "Cluster size not set, setting to default " << numSequences/100 << std::endl;
+                std::cerr << "Cluster size not set, setting to default " << defaultBackboneSize << std::endl;
             }
             
             params.batchSize = backboneSize;

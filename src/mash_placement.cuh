@@ -42,10 +42,10 @@ namespace MashPlacement
         bool useMurphy8=false;
         uint64_t clusterSize=0;
         bool proteinBinary=false;
-        float entropyGamma=2.0f;
-        float gammaAlpha=0.8f;
-        float proteinSaturation=0.92f;
-        float lowOverlapPriorWeight=3.0f;
+        float entropyGamma=0.25f;
+        float gammaAlpha=3.0f;
+        float proteinSaturation=1.15f;
+        float lowOverlapPriorWeight=0.2f;
 
         Param(uint64_t t_kmerSize, uint64_t t_sketchSize, uint64_t t_threshold, uint64_t t_distanceType, std::string t_in, std::string t_out)
         {
@@ -53,6 +53,49 @@ namespace MashPlacement
             in = t_in, out = t_out; 
         };
     };
+
+    struct GlobalMSAContext {
+        const uint64_t* h_compressedSeqs = nullptr;
+        std::vector<float> h_siteWeights;
+        int seqLen = 0;
+        size_t totalNumSequences = 0;
+        Param params = Param(15, 1000, 1, 2, "m", "t");
+        bool valid = false;
+    };
+    inline GlobalMSAContext g_msaContext;
+
+    void buildNJSeedTreeOnGpu(
+        int seedSize,
+        int totalSlots,
+        const std::function<void(int, double*)>& computeRowDist,
+        int* d_head,
+        int* d_e,
+        int* d_nxt,
+        int* d_belong,
+        double* d_len,
+        double* d_closest_dis,
+        int* d_closest_id,
+        int& outEdgeIdx
+    );
+
+    void refineAdjacencyTreeWithProfileNNI(
+        int rootNode,
+        int totalSlots,
+        int* h_head,
+        int* h_e,
+        int* h_nxt,
+        int* h_belong,
+        double* h_len,
+        int* outEdgeCount = nullptr,
+        int maxRounds = 12
+    );
+
+    void refineNJTreeWithProfileNNI(
+        int rootNode,
+        int numLeaves,
+        std::vector<std::vector<std::pair<int, double>>>& tree,
+        int maxRounds = 12
+    );
 
     inline void loadProteinModelEnvironment(Param& params) {
         if (const char* value = std::getenv("DIPPER_ENTROPY_GAMMA")) {
